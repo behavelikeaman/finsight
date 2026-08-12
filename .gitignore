@@ -4,6 +4,12 @@ out/
 next-env.d.ts
 tsconfig.tsbuildinfo
 
+# 환경변수 — 템플릿만 커밋한다.
+# execute.py가 매 step에서 `git add -A`를 실행하므로 이 규칙이 없으면
+# 자동 실행 중에 실제 키가 그대로 커밋된다.
+.env*
+!.env.example
+
 # phase execution outputs
 phases/**/phase*-output.json
 phases/**/step*-output.json
