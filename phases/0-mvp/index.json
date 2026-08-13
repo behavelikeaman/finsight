@@ -1,0 +1,18 @@
+{
+  "project": "FinSight",
+  "phase": "0-mvp",
+  "steps": [
+    { "step": 0, "name": "project-setup", "status": "pending" },
+    { "step": 1, "name": "core-types", "status": "pending" },
+    { "step": 2, "name": "csv-parsing", "status": "pending" },
+    { "step": 3, "name": "redaction", "status": "pending" },
+    { "step": 4, "name": "anthropic-service", "status": "pending" },
+    { "step": 5, "name": "supabase-schema", "status": "pending" },
+    { "step": 6, "name": "parse-api", "status": "pending" },
+    { "step": 7, "name": "rules-and-quota", "status": "pending" },
+    { "step": 8, "name": "classify-api", "status": "pending" },
+    { "step": 9, "name": "auth", "status": "pending" },
+    { "step": 10, "name": "landing", "status": "pending" },
+    { "step": 11, "name": "try-flow", "status": "pending" }
+  ]
+}
