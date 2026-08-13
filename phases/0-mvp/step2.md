@@ -1,112 +1,118 @@
-# Step 2: csv-parsing
+# Step 2: file-ingest
 
 ## 읽어야 할 파일
 
-먼저 아래 파일들을 읽고 프로젝트의 아키텍처와 설계 의도를 파악하라:
-
 - `/CLAUDE.md`
-- `/docs/ARCHITECTURE.md`
-- `/docs/ADR.md` (특히 ADR-003)
-- `/src/types/` 전체 (step 1에서 생성)
+- `/docs/ARCHITECTURE.md` — 디렉토리 구조와 분석 파이프라인 1단계
+- `/docs/ADR.md` — ADR-006(브라우저 전처리), ADR-008(ExcelJS)
+- `/src/types/domain.ts` (step1 산출물 — `RawTable`, `SourceKind`)
+- `/src/types/tier.ts` (step1 — `MAX_ROWS`)
+- `/vitest.config.ts` (step0 산출물)
 
 ## 작업
 
-`src/lib/csv/`에 CSV 파싱 유틸리티를 구현한다. **이 step에서는 AI를 호출하지 않는다.** 전부 순수 함수이며 전부 테스트를 동반한다.
+`src/lib/ingest/`에 **파일 → `RawTable`** 변환을 구현한다. 이 코드는 브라우저에서 실행되므로 Node 전용 API(`fs` 등)를 쓰면 안 된다. 입력은 `ArrayBuffer`다.
 
-### `src/lib/csv/encoding.ts`
-
-```ts
-export function decodeBuffer(buffer: ArrayBuffer): { text: string; encoding: "utf-8" | "cp949" };
-```
-
-동작: UTF-8로 디코딩을 시도하되 `TextDecoder("utf-8", { fatal: true })`를 사용해 실패를 감지한다. 실패하면 `TextDecoder("euc-kr")`로 재시도한다 (Node의 euc-kr 디코더가 CP949 영역을 포함한다).
-
-`fatal: true` 없이 디코딩하면 잘못된 바이트가 U+FFFD로 조용히 치환되어 감지가 불가능하다. 반드시 fatal 모드로 판별하라.
-
-추가 방어: UTF-8 디코딩이 성공했더라도 결과에 U+FFFD가 포함되어 있으면 cp949로 재시도한다.
-
-### `src/lib/csv/fingerprint.ts`
+### 공개 인터페이스 (`src/lib/ingest/index.ts`)
 
 ```ts
-export function computeFingerprint(rows: string[][]): string;
-export function findHeaderRow(rows: string[][]): number;
+export interface IngestResult { table: RawTable; skippedPreambleRows: number; droppedTotalRows: number }
+export interface IngestOptions { maxRows?: number }   // 기본값은 tier.ts의 MAX_ROWS
+
+export async function ingestFile(
+  buffer: ArrayBuffer, fileName: string, options?: IngestOptions
+): Promise<IngestResult>
+
+export function detectSourceKind(fileName: string): SourceKind
 ```
 
-`findHeaderRow`: 카드사 CSV는 상단에 "이용내역", 조회 기간, 빈 행 같은 머리말이 붙는 경우가 많다. 컬럼 수가 가장 많고 셀이 대부분 비어있지 않은 첫 행을 헤더로 판정한다.
-
-`computeFingerprint`: 헤더 행의 셀 값을 정규화(공백 제거, 소문자화)한 뒤 join하여 SHA-256 해시를 만든다. 조회 기간처럼 매번 바뀌는 값은 헤더에 포함되지 않으므로 같은 카드사의 다른 달 파일은 같은 지문을 갖는다.
-
-지문에 행 개수나 데이터 내용을 섞지 마라. 이유: 매 파일마다 지문이 달라져 매핑 캐시가 무효화되고, ADR-003의 비용 절감이 사라진다.
-
-### `src/lib/csv/parse.ts`
+### 1. 인코딩 감지 (`encoding.ts`)
 
 ```ts
-export function splitRows(text: string): string[][];
+export function decodeText(buffer: ArrayBuffer): string
 ```
 
-CSV 문자열을 2차원 배열로 분해한다. 따옴표로 감싼 필드 안의 쉼표와 개행을 올바르게 처리해야 한다. 직접 구현하지 말고 `papaparse`를 사용하라 — 직접 만든 split은 반드시 인용 필드에서 깨진다.
+한국 카드사 CSV는 상당수가 **EUC-KR/CP949**다. UTF-8로 단정하면 글자가 전부 깨진다.
 
-### `src/lib/csv/normalize.ts`
+판정 순서: UTF-8 BOM 확인 → `TextDecoder('utf-8', { fatal: true })` 시도 → 실패하면 `TextDecoder('euc-kr')`로 폴백. 브라우저 `TextDecoder`가 `euc-kr`을 지원한다.
+
+### 2. CSV 파싱 (`csv.ts`)
 
 ```ts
-export function parseAmount(raw: string): number;
-export function parseDate(raw: string, format: string): string;  // → "YYYY-MM-DD"
-export function applyMapping(rows: string[][], mapping: ColumnMapping): Transaction[];
+export function parseCsv(text: string): string[][]
 ```
 
-`parseAmount` 요구사항:
-- 콤마 제거 (`"1,234,000"` → `1234000`)
-- 통화 기호·공백·`원` 제거
-- 괄호 표기 음수 지원 (`"(1,000)"` → `-1000`)
-- 선행 `-` 지원
-- 소수점이 있으면 반올림해 정수로. 이유: 원 단위 아래는 카드 거래에 존재하지 않으며, 부동소수점을 남기면 합계 오차가 생긴다
-- 파싱 불가 시 예외를 던진다. 0을 반환하지 마라 — 조용한 오분류로 이어진다
+따옴표로 감싼 필드, 필드 내 쉼표·줄바꿈, 이스케이프된 따옴표(`""`)를 처리한다. 외부 CSV 라이브러리를 추가하지 말고 직접 구현한다. 이유: 의존성 하나를 아끼는 것보다, 이 파서가 픽스처로 완전히 검증되는 편이 낫다.
 
-`parseDate` 요구사항:
-- 최소 `YYYY.MM.DD`, `YYYY-MM-DD`, `YYYY/MM/DD`, `YYYYMMDD`, `MM/DD` 지원
-- `MM/DD`처럼 연도가 없으면 예외를 던진다 (연도 추론은 오류 원인이 된다)
-- 항상 `YYYY-MM-DD`로 정규화
+### 3. 엑셀 파싱 (`xlsx.ts`)
 
-`applyMapping`: `mapping.headerRowIndex` 다음 행부터 순회하며 `Transaction[]`을 만든다. 빈 행과 합계 행(금액 컬럼이 비었거나 가맹점명이 비어있는 행)은 건너뛴다. 각 행의 원본을 `rawRow`에 보존한다.
+```ts
+export async function parseXlsx(buffer: ArrayBuffer): Promise<string[][]>
+```
 
-### 테스트
+**ExcelJS를 동적 import 한다** (`await import('exceljs')`). 이유: 정적 import하면 랜딩 초기 번들에 들어가 LCP를 해친다. 사용자가 `.xlsx`를 드롭한 순간에만 로드되어야 한다.
 
-`src/lib/csv/__tests__/`에 각 모듈의 테스트를 작성한다. 최소한 다음을 커버하라:
+첫 워크시트만 읽는다. 셀 값은 전부 문자열로 변환한다(날짜 셀은 `YYYY-MM-DD` 형태 문자열로).
 
-- `decodeBuffer`: UTF-8 한글, CP949 한글, ASCII만 있는 경우
-- `parseAmount`: 콤마, 괄호 음수, 통화기호, 파싱 실패 시 예외
-- `parseDate`: 지원 포맷 전부, 연도 없는 입력에서 예외
-- `findHeaderRow`: 머리말 3행이 앞에 붙은 케이스
-- `computeFingerprint`: 같은 카드사의 서로 다른 달 파일이 같은 지문을 갖는지
-- `applyMapping`: 합계 행·빈 행 스킵
+### 4. 표 정리 (`cleanup.ts`)
 
-테스트 픽스처는 `src/lib/csv/__tests__/fixtures/`에 두되, **실제 개인 카드 명세서를 넣지 마라.** 가상의 가맹점명과 금액으로 만든 샘플만 사용한다.
+```ts
+export function findHeaderRow(rows: string[][]): number
+export function dropTotalRows(rows: string[][], headerIdx: number): { rows: string[][]; dropped: number }
+```
+
+**상단 안내문 제거**: 카드사 명세서는 헤더 앞에 "고객님의 이용내역입니다" 같은 줄이 붙는다. 비어 있지 않은 셀 개수가 안정적으로 최대가 되는 첫 행을 헤더로 판정한다.
+
+**하단 합계 행 제거**: 맨 아래 "합계 1,234,567" 같은 행. 판정 기준은 *날짜로 파싱 가능한 셀이 없고 숫자 셀만 있는 행*, 또는 첫 셀이 `합계`·`총계`·`계`·`Total`인 행.
+
+> 이 처리를 놓치면 **총액이 2배가 된다.** 금액 정확성이 이 제품의 존재 이유이므로 반드시 테스트로 고정한다.
+
+### 5. 상한
+
+행 수가 `maxRows`를 넘으면 명확한 메시지와 함께 throw한다. 기본값은 `src/types/tier.ts`의 `MAX_ROWS`를 import해서 쓴다 — **숫자를 하드코딩하지 마라.** 이유: 서버(step8)도 같은 상한을 검사하며, 두 값이 어긋나면 브라우저를 통과한 파일이 서버에서 거부된다. 조용히 잘라내지 마라. 이유: 사용자가 일부만 분석된 줄 모르고 잘못된 결론을 얻는다.
+
+### 테스트 픽스처
+
+`src/lib/ingest/__fixtures__/`에 최소 8종을 만든다. **바이너리 픽스처(EUC-KR, xlsx)는 테스트 코드에서 생성**한다(문자열을 인코딩하거나 ExcelJS로 워크북을 만들어 buffer 추출).
+
+1. UTF-8 정상 CSV
+2. EUC-KR CSV (한글 가맹점명)
+3. 상단 안내문 3줄이 붙은 CSV
+4. 하단 합계 행이 있는 CSV
+5. 안내문 + 합계 행이 둘 다 있는 CSV
+6. 따옴표·필드 내 쉼표가 있는 CSV
+7. 같은 내용의 .xlsx
+8. 빈 파일 / 거래 0건
 
 ## Acceptance Criteria
 
 ```bash
-npm run build   # 컴파일 에러 없음
-npm test        # 신규 테스트 포함 전부 통과
-npm run lint    # 에러 없음
+npm run lint
+npm run build
+npm run test
+npx vitest run src/lib/ingest
 ```
 
 ## 검증 절차
 
 1. 위 AC 커맨드를 실행한다.
-2. 아키텍처 체크리스트를 확인한다:
-   - 코드가 `src/lib/csv/`에 있는가?
-   - 외부 API 호출이 전혀 없는가? (이 step은 순수 함수만)
-   - CLAUDE.md CRITICAL 규칙을 위반하지 않았는가?
+2. 아키텍처 체크리스트:
+   - 합계 행이 있는 픽스처에서 행 수가 정확히 하나 줄었는가?
+   - EUC-KR 픽스처에서 한글이 깨지지 않는가?
+   - ExcelJS가 **동적 import**인가? (`grep -n "import('exceljs')" src/lib/ingest/xlsx.ts`)
+   - `fs`·`Buffer` 등 Node 전용 API를 쓰지 않았는가?
+   - `grep -n "10000\|10_000" src/lib/ingest/` 가 비어 있는가? (`MAX_ROWS`를 import해야 한다)
 3. 결과에 따라 `phases/0-mvp/index.json`의 step 2를 업데이트한다:
-   - 성공 → `"status": "completed"`, `"summary": "산출물 한 줄 요약"`
-   - 수정 3회 시도 후에도 실패 → `"status": "error"`, `"error_message": "구체적 에러 내용"`
-   - 사용자 개입 필요 → `"status": "blocked"`, `"blocked_reason": "구체적 사유"` 후 즉시 중단
+   - 성공 → `"status": "completed"`, `"summary"`에 공개 함수 시그니처와 픽스처 종류를 한 줄로
+   - 실패 → `"status": "error"` + `"error_message"`
+   - 사용자 개입 필요 → `"status": "blocked"` + `"blocked_reason"` 후 중단
 
 ## 금지사항
 
-- Anthropic API를 호출하지 마라. 컬럼 매핑 추론은 step 4에서 다룬다. 이유: 파싱 로직은 AI 없이 결정론적으로 테스트 가능해야 한다.
-- CSV 분해를 직접 구현하지 마라(`text.split(",")` 금지). 이유: 따옴표로 감싼 필드 내부의 쉼표에서 반드시 깨진다. `papaparse`를 쓴다.
-- `TextDecoder`를 fatal 모드 없이 쓰지 마라. 이유: 인코딩 오류가 U+FFFD로 조용히 치환되어 감지되지 않는다.
-- 파싱 실패 시 기본값(0, 오늘 날짜 등)을 반환하지 마라. 예외를 던져라. 이유: 조용한 오분류는 사용자가 세무 신고에 잘못된 금액을 쓰게 만든다.
-- 실제 개인 카드 명세서를 테스트 픽스처로 커밋하지 마라.
-- 기존 테스트를 깨뜨리지 마라
+- `xlsx`(SheetJS) 패키지를 쓰지 마라. 이유: npm 배포가 0.18.5에서 멈춰 보안 수정본이 레지스트리에 없다.
+- ExcelJS를 정적 import 하지 마라. 이유: 랜딩 초기 번들이 커져 LCP가 나빠진다.
+- `fs`, `path`, `Buffer` 같은 Node 전용 API를 쓰지 마라. 이유: 이 코드는 브라우저에서도 실행된다.
+- 헤더를 첫 행으로 단정하지 마라. 이유: 카드사 명세서는 상단에 안내문이 붙어 나온다.
+- 상한 초과 시 조용히 잘라내지 마라. 이유: 사용자가 일부만 분석된 사실을 모른 채 잘못된 결론을 얻는다.
+- 컬럼 매핑·집계·경비 분류를 여기서 하지 마라. 이유: 각각 step3, step4, step10·11의 범위다.
+- 기존 테스트를 깨뜨리지 마라.

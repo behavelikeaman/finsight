@@ -1,88 +1,103 @@
-# Step 3: redaction
+# Step 3: column-mapping
 
 ## 읽어야 할 파일
 
-먼저 아래 파일들을 읽고 프로젝트의 아키텍처와 설계 의도를 파악하라:
-
-- `/CLAUDE.md` (CRITICAL 규칙 — 마스킹 강제)
-- `/docs/ADR.md` (특히 ADR-004)
-- `/src/types/` 전체
-- `/src/lib/csv/` 전체 (step 2에서 생성)
+- `/CLAUDE.md`
+- `/docs/ARCHITECTURE.md`
+- `/src/types/domain.ts` (step1 — `RawTable`, `ColumnMapping`, `NormalizedRow`)
+- `/src/lib/ingest/index.ts` 와 `/src/lib/ingest/__fixtures__/` (step2 산출물 — 입력이 되는 `RawTable`의 실제 형태를 확인하라)
 
 ## 작업
 
-`src/lib/redact.ts`를 구현한다. 이 모듈은 **외부 API로 나가는 모든 데이터가 반드시 통과해야 하는 단일 관문**이다.
+`src/lib/mapping/`에 **`RawTable` → `NormalizedRow[]`** 변환을 구현한다. 순수 함수이며 브라우저·서버 양쪽에서 동일하게 실행된다.
+
+### 공개 인터페이스 (`src/lib/mapping/index.ts`)
 
 ```ts
-export interface RedactionResult<T> {
-  data: T;
-  removedCount: number;   // 제거된 민감정보 개수. 로깅·감사용
-}
+export function guessMapping(headers: string[]): ColumnMapping
 
-export function redactTransactions(transactions: Transaction[]): RedactionResult<Transaction[]>;
-export function redactText(text: string): RedactionResult<string>;
+export interface MappingIssue { kind: 'missing' | 'unparsable'; field: 'date'|'merchant'|'amount'; detail: string }
+export function validateMapping(table: RawTable, mapping: ColumnMapping): MappingIssue[]
+
+export interface NormalizeResult { rows: NormalizedRow[]; skipped: number }
+export function normalizeRows(table: RawTable, mapping: ColumnMapping): NormalizeResult
 ```
 
-### 제거 대상
+### 1. 헤더 추측 (`heuristics.ts`)
 
-1. **카드번호** — 13~19자리 숫자열. 하이픈/공백 구분 포함 (`1234-5678-9012-3456`, `1234 5678 9012 3456`). 마스킹된 형태(`****-****-****-3456`)도 뒷 4자리를 제거한다.
-2. **계좌번호** — 하이픈으로 구분된 10자리 이상 숫자열 (`110-123-456789`).
-3. **주민등록번호** — `\d{6}-?\d{7}`.
-4. **사업자등록번호** — `\d{3}-?\d{2}-?\d{5}`.
-5. **성명 후보** — CSV에 `회원명`, `이용자명`, `성명` 같은 컬럼이 있었다면 해당 값. 단, 가맹점명 컬럼은 절대 건드리지 않는다.
+한국 카드사 별칭 사전 + 범용 영문 헤더를 함께 본다. 대소문자·공백·괄호를 제거해 정규화한 뒤 비교한다.
 
-제거는 삭제가 아니라 **치환**으로 한다: `[REDACTED_CARD]`, `[REDACTED_ACCOUNT]` 등. 이유: 자리를 남겨야 AI가 "여기 무언가 있었다"는 걸 알고 오해하지 않는다.
+- **날짜**: 이용일, 이용일자, 거래일, 거래일자, 승인일, 승인일자, 매출일자, date, transaction date, 결제일
+- **가맹점**: 가맹점, 가맹점명, 이용하신곳, 이용가맹점, 상호, 내용, 적요, merchant, description
+- **금액**: 이용금액, 승인금액, 결제금액, 청구금액, 거래금액, 금액, amount, 원화금액, 국내이용금액
 
-### 적용 범위
+우선순위 규칙:
+- 금액 후보가 여러 개면 **원화/청구 계열을 우선**한다. 이유: 해외 결제 명세서는 외화 금액 컬럼이 함께 있는데 그걸 고르면 값이 틀린다.
+- 별칭에 걸리는 헤더가 없으면 값 패턴으로 추론한다(날짜형 값이 많은 컬럼 → 날짜, 숫자형 → 금액).
 
-`redactTransactions`는 `Transaction`의 `merchant`와 `rawRow` 전체에 `redactText`를 적용한다.
+**카드번호 컬럼은 어떤 필드에도 매핑하지 않는다.** 카드번호, 카드번호뒷자리, card no 등은 후보에서 제외한다. 이유: 저장하지 않기로 한 데이터가 매핑 후보에 뜨면 사용자가 실수로 고를 수 있다.
 
-**`rawRow`를 반드시 포함해야 한다.** 이유: 컬럼 매핑 추론(step 4)에서 원본 행을 AI에 보내는데, 여기에 카드번호가 그대로 들어있다. `merchant`만 마스킹하고 `rawRow`를 빠뜨리면 CLAUDE.md의 CRITICAL 규칙이 무력화된다.
+### 2. 값 정규화 (`normalize.ts`)
 
-`amount`와 `date`는 마스킹하지 않는다 — 분류에 필수적이고 그 자체로 식별정보가 아니다.
+```ts
+export function parseAmountKrw(raw: string): number | null
+export function parseDate(raw: string, fallbackYear?: number): string | null   // 'YYYY-MM-DD'
+```
 
-### 과잉 마스킹 방지
+**금액** — 다음을 전부 정수(원)로 변환한다:
+`1,234` · `₩1,234` · `1234원` · `-1,234` · `(1,234)`(괄호는 음수) · `1,234.00`(소수부 0이면 버림)
 
-가맹점명에 숫자가 섞이는 경우가 흔하다 (`GS25 강남1호점`, `스타벅스 1234점`). 4자리 이하 숫자나 문자와 붙어있는 숫자는 마스킹하지 마라. 정규식에 단어 경계를 명시하라.
+`parseFloat`을 쓰지 마라. 이유: 통화를 부동소수점으로 다루면 합계에 오차가 쌓인다. 문자열에서 숫자만 추출해 정수로 만든다. 소수부가 0이 아니면 반올림하되, 원 단위 정수를 반환한다.
 
-과잉 마스킹은 과소 마스킹만큼 나쁘다 — 가맹점명이 뭉개지면 분류 품질이 무너진다.
+**날짜** — 다음 포맷을 처리한다:
+`2026.08.10` · `2026-08-10` · `2026/08/10` · `20260810` · `08/10`(연도 없음) · `2026년 8월 10일`
+
+연도가 없으면 `fallbackYear`(파일 내 최빈 연도)를 쓴다.
+
+### 3. 검증 (`validateMapping`)
+
+- 세 필드 중 하나라도 `null`이면 `kind:'missing'` 이슈
+- 상위 20행을 샘플링해 파싱 실패율이 50%를 넘는 필드는 `kind:'unparsable'` 이슈. 이유: 사용자가 금액에 카드번호를 매핑하는 실수를 잡아야 한다
+
+### 4. 정규화 (`normalizeRows`)
+
+행 단위로 파싱한다. 세 값 중 하나라도 파싱에 실패한 행은 **건너뛰고 `skipped`에 센다.** 전체를 실패시키지 마라. 이유: 명세서 한 줄이 이상하다고 분석 전체를 버리면 사용자는 아무것도 얻지 못한다.
+
+할부·해외 결제에 전용 코드를 쓰지 마라. 원화 청구액 컬럼을 쓰면 그대로 맞다.
 
 ### 테스트
 
-`src/lib/__tests__/redact.test.ts`에 작성한다. 최소한 다음을 커버하라:
+step2의 픽스처를 재사용해 실제 `RawTable`로 검증한다. 별칭 사전 적중, 원화 우선 선택, 카드번호 제외, 금액·날짜 포맷 전종, 파싱 실패 행 skip, 검증 이슈 검출을 각각 테스트한다.
 
-- 카드번호 4가지 표기(하이픈/공백/연속/마스킹된 형태) 제거
-- 계좌번호, 주민번호, 사업자번호 제거
-- `rawRow` 안의 민감정보도 제거되는지
-- **과잉 마스킹 방지**: `GS25 강남1호점`, `스타벅스 1234점`, `이마트24`가 원형 그대로 남는지
-- `amount`, `date`가 변경되지 않는지
-- `removedCount`가 정확한지
+`normalizeRows`가 반환하는 `NormalizedRow`에는 **날짜·가맹점·금액 세 필드만** 있어야 한다. 원본 행의 다른 값(카드번호, 승인번호, 할부개월)을 실어 보내지 마라. 이유: 이 배열이 그대로 서버로 가고, 서버에 도달한 값은 언젠가 저장된다.
 
 ## Acceptance Criteria
 
 ```bash
-npm run build   # 컴파일 에러 없음
-npm test        # 신규 테스트 포함 전부 통과
-npm run lint    # 에러 없음
+npm run lint
+npm run build
+npm run test
+npx vitest run src/lib/mapping
 ```
 
 ## 검증 절차
 
 1. 위 AC 커맨드를 실행한다.
-2. 아키텍처 체크리스트를 확인한다:
-   - `src/lib/redact.ts` 경로가 CLAUDE.md에 명시된 것과 일치하는가?
-   - 외부 API 호출이 없는 순수 함수인가?
-   - CLAUDE.md CRITICAL 규칙을 위반하지 않았는가?
+2. 아키텍처 체크리스트:
+   - `grep -rn "parseFloat" src/lib/mapping/` 결과가 비어 있는가?
+   - 금액 후보가 여럿일 때 원화 계열을 고르는 테스트가 있는가?
+   - 카드번호 헤더가 매핑 후보에서 제외되는 테스트가 있는가?
+   - I/O나 외부 호출이 없는 순수 함수인가?
 3. 결과에 따라 `phases/0-mvp/index.json`의 step 3을 업데이트한다:
-   - 성공 → `"status": "completed"`, `"summary": "산출물 한 줄 요약"`
-   - 수정 3회 시도 후에도 실패 → `"status": "error"`, `"error_message": "구체적 에러 내용"`
-   - 사용자 개입 필요 → `"status": "blocked"`, `"blocked_reason": "구체적 사유"` 후 즉시 중단
+   - 성공 → `"status": "completed"`, `"summary"`에 공개 함수와 별칭 사전 위치를 한 줄로
+   - 실패 → `"status": "error"` + `"error_message"`
+   - 사용자 개입 필요 → `"status": "blocked"` + `"blocked_reason"` 후 중단
 
 ## 금지사항
 
-- `merchant`만 마스킹하고 `rawRow`를 건너뛰지 마라. 이유: 원본 행이 step 4에서 AI로 전송되며, 거기에 카드번호가 들어있다.
-- 가맹점명 컬럼의 값을 성명으로 오인해 제거하지 마라. 이유: 분류의 유일한 근거가 사라진다.
-- 4자리 이하 숫자를 마스킹하지 마라. 이유: `GS25`, `이마트24` 같은 정상 가맹점명이 파괴된다.
-- 마스킹 대상을 삭제(빈 문자열)하지 말고 플레이스홀더로 치환하라.
-- 마스킹된 원본 값을 어디에도 로깅하지 마라.
-- 기존 테스트를 깨뜨리지 마라
+- `parseFloat`이나 부동소수점 연산을 쓰지 마라. 이유: 통화 계산에 오차가 쌓인다.
+- 카드번호 컬럼을 매핑 후보에 넣지 마라. 이유: 저장하지 않기로 한 데이터이며, 후보에 뜨면 사용자가 실수로 고른다.
+- 파싱 실패 행 하나 때문에 전체를 실패시키지 마라. 이유: 사용자가 아무 결과도 못 얻는다.
+- 할부·해외결제 전용 분기를 만들지 마라. 이유: 원화 청구액 컬럼을 쓰면 자동으로 맞고, 분기는 MVP 범위 밖이다.
+- 집계나 경비 분류를 여기서 하지 마라. 이유: 집계는 step4, 분류는 step10·11의 범위다.
+- 기존 테스트를 깨뜨리지 마라.

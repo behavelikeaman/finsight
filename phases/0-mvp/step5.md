@@ -1,157 +1,104 @@
-# Step 5: supabase-schema
+# Step 5: redaction
 
 ## 읽어야 할 파일
 
-먼저 아래 파일들을 읽고 프로젝트의 아키텍처와 설계 의도를 파악하라:
-
-- `/CLAUDE.md` (CRITICAL — 원본 30일 삭제, RLS 필수)
-- `/docs/ARCHITECTURE.md` (저장 정책 절)
-- `/docs/ADR.md` (특히 ADR-005, ADR-008, ADR-009)
-- `/src/types/` 전체
+- `/CLAUDE.md` — 보안 규칙 (마스킹 강제)
+- `/docs/ADR.md` — ADR-009(민감정보 제거 후 국외 전송)
+- `/src/types/domain.ts` (step1 — `IdentifiedRow`, `RedactedRow`. 브랜디드 타입 정의를 반드시 확인하라)
+- `/src/lib/mapping/index.ts` (step3 — 어떤 값이 여기까지 오는지 확인하라)
 
 ## 작업
 
-Supabase 스키마를 SQL 마이그레이션으로 작성하고, 서버/클라이언트 Supabase 래퍼를 만든다.
+`src/lib/redact.ts`를 구현한다. 이 모듈은 **외부 API로 나가는 모든 데이터가 반드시 통과해야 하는 단일 관문**이다.
 
-### 마이그레이션 파일
+### 이 관문이 필요한 이유
 
-`supabase/migrations/0001_initial.sql`에 작성한다. Supabase CLI를 설치할 필요는 없다 — SQL 파일만 준비하면 사용자가 대시보드나 CLI로 적용한다.
+컬럼 매핑(step3)이 카드번호 컬럼을 후보에서 제외하므로, 정상 경로에서는 카드번호가 여기까지 오지 않는다. 그럼에도 이 모듈을 두는 이유는 **가맹점명 필드 자체에 민감정보가 섞여 들어오기 때문**이다. 실제 명세서에는 `홍길동님 계좌이체`, `국민 123-45-678901 이체` 같은 적요가 가맹점명 자리에 들어온다.
 
-#### 테이블
+즉 이건 중복 방어가 아니라 **다른 종류의 방어**다.
 
-**`profiles`** — `auth.users` 확장
-- `id uuid primary key references auth.users(id) on delete cascade`
-- `tier text not null default 'free' check (tier in ('free','paid'))`
-- `created_at timestamptz not null default now()`
+### 공개 인터페이스
 
-**`column_mappings`** — 카드사 지문별 컬럼 매핑 (ADR-003)
-- `fingerprint text primary key`
-- `issuer_label text not null`
-- `header_row_index int not null`
-- `date_column int not null`, `merchant_column int not null`, `amount_column int not null`
-- `encoding text not null check (encoding in ('utf-8','cp949'))`
-- `date_format text not null`
-- `created_at timestamptz not null default now()`
+```ts
+export interface RedactionResult<T> {
+  data: T
+  removedCount: number   // 제거된 민감정보 개수. 로깅·감사용
+}
 
-이 테이블은 **전역 공유**다. 개인정보가 없고, 한 사용자의 추론 결과가 다른 사용자에게도 유효하다. RLS는 "인증 사용자 읽기 가능, 쓰기는 service role만"으로 건다.
-
-**`uploads`** — 업로드 1건
-- `id uuid primary key default gen_random_uuid()`
-- `user_id uuid not null references auth.users(id) on delete cascade`
-- `storage_path text` — 원본 CSV 경로. 30일 후 삭제되면 null
-- `fingerprint text references column_mappings(fingerprint)`
-- `transaction_count int not null`
-- `created_at timestamptz not null default now()`
-- `original_deleted_at timestamptz` — 원본 삭제 시각 기록 (ADR-005 감사용)
-
-**`transactions`** — 정규화 거래
-- `id uuid primary key`
-- `upload_id uuid not null references uploads(id) on delete cascade`
-- `user_id uuid not null references auth.users(id) on delete cascade`
-- `date date not null`
-- `merchant text not null`
-- `amount bigint not null` — 원 단위 정수
-- 인덱스: `(user_id, date)`
-
-`rawRow`는 **DB에 저장하지 않는다.** 이유: 원본 행에는 카드번호 등 우리가 쓰지 않는 항목이 들어있고, ADR-005의 취지는 그 노출면을 줄이는 것이다. `rawRow`는 파싱 세션 안에서만 존재한다.
-
-**`classifications`**
-- `transaction_id uuid primary key references transactions(id) on delete cascade`
-- `user_id uuid not null references auth.users(id) on delete cascade`
-- `label text not null check (label in ('business','personal','uncertain'))`
-- `account_code text`
-- `confidence real not null`
-- `reason text not null`
-- `source text not null check (source in ('ai','rule'))`
-- `edited_by_user boolean not null default false`
-- `updated_at timestamptz not null default now()`
-
-**`user_rules`** (ADR-008)
-- `id uuid primary key default gen_random_uuid()`
-- `user_id uuid not null references auth.users(id) on delete cascade`
-- `match_type text not null check (match_type in ('merchant_exact','merchant_contains'))`
-- `pattern text not null`
-- `label text not null check (label in ('business','personal','uncertain'))`
-- `account_code text`
-- `created_at timestamptz not null default now()`
-- unique: `(user_id, match_type, pattern)`
-
-**`usage_counters`** (ADR-009)
-- `user_id uuid not null references auth.users(id) on delete cascade`
-- `period text not null` — `YYYY-MM`
-- `analyses int not null default 0`
-- `chat_messages int not null default 0`
-- primary key `(user_id, period)`
-
-**`anonymous_trials`** (ADR-012)
-- `fingerprint_hash text primary key` — IP + UA 기반 해시. 원본 IP를 저장하지 마라
-- `used_at timestamptz not null default now()`
-
-#### RLS
-
-**모든 테이블에 `enable row level security`를 건다.** 예외 없다.
-
-- `profiles`, `uploads`, `transactions`, `classifications`, `user_rules`, `usage_counters`: `auth.uid() = user_id` (profiles는 `auth.uid() = id`)로 select/insert/update/delete 정책
-- `column_mappings`: authenticated 롤 select 허용, insert/update는 정책 없음(service role만)
-- `anonymous_trials`: 정책 없음(service role만). 클라이언트가 접근할 이유가 없다
-
-#### Storage
-
-`uploads` 버킷을 private으로 만드는 SQL과, 경로 규칙 `{user_id}/{upload_id}.csv`를 주석으로 문서화한다.
-
-#### 30일 삭제
-
-`supabase/migrations/0002_retention.sql`에 원본 삭제 함수를 작성한다.
-
-```sql
-create or replace function delete_expired_originals() returns void
+export function redactMerchant(raw: string): string
+export function redactRows(rows: IdentifiedRow[]): RedactionResult<RedactedRow[]>
 ```
 
-`created_at < now() - interval '30 days' and storage_path is not null`인 uploads의 스토리지 객체를 삭제하고, `storage_path`를 null로, `original_deleted_at`을 now()로 설정한다.
+**이 파일이 `RedactedRow`를 만드는 유일한 곳이다.** step1이 브랜디드 타입으로 정의했으므로, 여기서 한 번만 캐스팅하고 그 캐스팅을 다른 파일에 복제하지 마라. 이유: `services/anthropic`이 `RedactedRow[]`만 받으므로, 이 관문을 건너뛴 값이 외부로 나가는 경로가 컴파일 단계에서 막힌다. 캐스팅이 여러 곳에 생기면 그 보장이 사라진다.
 
-`pg_cron`으로 하루 1회 스케줄하는 SQL을 주석으로 남기되, 실행은 하지 마라 — 프로젝트 설정에 따라 확장 활성화가 필요하며 사용자 개입 사항이다.
+`id`는 마스킹 대상이 아니다. 그대로 보존한다 — 호출부가 이 `id`로 분류 결과를 되짚는다.
 
-### 코드
+### 제거 대상
 
-**`src/services/supabase/server.ts`** — `@supabase/ssr`의 서버 클라이언트. `import "server-only"` 필수.
-**`src/services/supabase/client.ts`** — 브라우저 클라이언트. anon 키만 사용.
-**`src/services/supabase/admin.ts`** — service role 클라이언트. `import "server-only"` 필수.
+가맹점명 문자열에서 아래 패턴을 마스킹한다. **삭제가 아니라 고정 토큰으로 치환한다.**
 
-`SUPABASE_SERVICE_ROLE_KEY`는 `NEXT_PUBLIC_` 접두사를 절대 붙이지 마라.
+| 대상 | 패턴 예 | 치환 |
+|---|---|---|
+| 카드번호 | `1234-5678-9012-3456`, `1234********3456`, 연속 13~16자리 숫자 | `[CARD]` |
+| 계좌번호 | `123-45-678901`, `110-234-567890` (하이픈 포함 8자리 이상 숫자열) | `[ACCT]` |
+| 주민등록번호 | `901010-1234567` | `[RRN]` |
+| 성명 | `홍길동님`, `홍길동 님` — 한글 2~4자 + `님` | `[NAME]` |
+| 전화번호 | `010-1234-5678` | `[PHONE]` |
 
-**`src/types/database.ts`** — 위 스키마에 대응하는 TS 타입을 손으로 작성한다. Supabase 타입 생성 CLI는 실제 프로젝트 연결이 필요하므로 이 step에서는 쓰지 않는다.
+**삭제하지 않고 토큰으로 치환하는 이유**: 그냥 지우면 `이체`만 남아 문맥이 사라지고 분류 품질이 떨어진다. `[NAME] 이체`는 "개인 간 송금"이라는 판단 근거가 된다.
+
+### 지켜야 할 것
+
+- `occurredOn`과 `amountKrw`는 **건드리지 마라.** 분류에 필수이고 민감정보가 아니다
+- 입력을 변형하지 마라(불변). 새 배열·새 객체를 반환한다
+- `removedCount`는 치환이 일어난 **횟수**를 센다. 한 행에서 두 개를 치환했으면 2
+- 한글 가맹점명(`스타벅스 강남점`)이 손상되지 않아야 한다. 과잉 마스킹은 분류 품질을 직접 깎는다
+
+### 과잉 마스킹 주의
+
+`4자리 이상 숫자열`을 전부 마스킹하면 `이마트24`, `GS25`, `배스킨라빈스31` 같은 정상 상호가 깨진다. 숫자 패턴은 **자릿수·구분자 형태를 함께 확인**해서 좁게 잡아라. 테스트로 고정한다.
 
 ### 테스트
 
-DB 연결 없이 검증 가능한 것만 테스트한다: `database.ts` 타입이 `src/types/`의 도메인 타입과 필드 단위로 대응하는지 확인하는 타입 레벨 테스트.
+- 카드번호 4종(하이픈/공백/별표/무구분) 전부 `[CARD]`로
+- `홍길동님 계좌이체` → `[NAME] 계좌이체`
+- `스타벅스 강남점` → **변경 없음**
+- `이마트24`, `GS25`, `배스킨라빈스31` → **변경 없음**
+- `국민 123-45-678901 이체` → `[ACCT]` 치환
+- 한 행에 두 패턴 → `removedCount === 2`
+- 입력 배열이 변형되지 않았는지 (원본 객체 참조 비교)
+- `amountKrw`·`occurredOn`·`id`가 그대로인지
 
 ## Acceptance Criteria
 
 ```bash
-npm run build   # 컴파일 에러 없음
-npm test        # 기존 테스트 통과
-npm run lint    # 에러 없음
+npm run lint
+npm run build
+npm run test
+npx vitest run src/lib/redact
 ```
 
 ## 검증 절차
 
 1. 위 AC 커맨드를 실행한다.
-2. 아키텍처 체크리스트를 확인한다:
-   - 모든 테이블에 RLS가 활성화되어 있는가?
-   - `transactions`에 `raw_row` 컬럼이 없는가?
-   - service role 키가 `NEXT_PUBLIC_`으로 노출되지 않는가?
-   - Supabase 래퍼가 `src/services/supabase/`에 있는가?
-3. SQL 파일을 눈으로 검토해 각 테이블의 RLS 정책이 빠짐없이 작성되었는지 확인한다.
-4. 결과에 따라 `phases/0-mvp/index.json`의 step 5를 업데이트한다:
-   - 성공 → `"status": "completed"`, `"summary": "산출물 한 줄 요약"`
-   - 수정 3회 시도 후에도 실패 → `"status": "error"`, `"error_message": "구체적 에러 내용"`
-   - 사용자 개입 필요 (Supabase 프로젝트 생성·마이그레이션 적용) → `"status": "blocked"`, `"blocked_reason": "구체적 사유"` 후 즉시 중단
+2. 아키텍처 체크리스트:
+   - 정상 상호(`이마트24`, `GS25`)가 보존되는 테스트가 있는가?
+   - 입력 불변성 테스트가 있는가?
+   - I/O·네트워크 호출이 없는 순수 함수인가?
+   - `amountKrw`·`occurredOn`·`id`를 수정하지 않는가?
+   - `grep -rn "as RedactedRow\|as unknown as" src/` 가 `src/lib/redact.ts` 밖에서 나오지 않는가?
+3. 결과에 따라 `phases/0-mvp/index.json`의 step 5를 업데이트한다:
+   - 성공 → `"status": "completed"`, `"summary"`에 공개 함수와 마스킹 토큰 목록을 한 줄로
+   - 실패 → `"status": "error"` + `"error_message"`
+   - 사용자 개입 필요 → `"status": "blocked"` + `"blocked_reason"` 후 중단
 
 ## 금지사항
 
-- RLS 없이 테이블을 만들지 마라. 이유: 한 사용자가 다른 사용자의 거래내역을 읽을 수 있게 된다.
-- `transactions`에 원본 행(`raw_row`)을 저장하지 마라. 이유: ADR-005의 노출면 축소 취지에 정면으로 반한다.
-- `SUPABASE_SERVICE_ROLE_KEY`에 `NEXT_PUBLIC_` 접두사를 붙이지 마라. 이유: 클라이언트 번들에 포함되어 RLS가 통째로 무력화된다.
-- `anonymous_trials`에 원본 IP를 저장하지 마라. 해시만 저장한다.
-- 실제 Supabase 프로젝트에 마이그레이션을 적용하려 시도하지 마라. SQL 파일 작성까지가 이 step의 범위다.
-- 기존 테스트를 깨뜨리지 마라
+- 민감정보를 삭제하지 마라. 이유: 문맥이 사라져 분류 품질이 떨어진다. 고정 토큰으로 치환한다.
+- `amountKrw`·`occurredOn`을 마스킹하지 마라. 이유: 분류에 필수이며 민감정보가 아니다.
+- 입력 객체를 변형하지 마라. 이유: 호출부가 원본을 화면에 그대로 쓰고 있어, 변형하면 사용자 화면의 가맹점명이 `[NAME]`으로 바뀐다.
+- 숫자열을 넓게 잡아 마스킹하지 마라. 이유: `이마트24`·`GS25` 같은 정상 상호가 깨져 분류가 나빠진다.
+- `RedactedRow` 캐스팅을 이 파일 밖에 두지 마라. 이유: 다른 곳에서 캐스팅할 수 있으면 타입이 주는 보장이 사라지고, 마스킹을 건너뛴 값이 외부로 나간다.
+- `id`를 마스킹하거나 떨어뜨리지 마라. 이유: 호출부가 이 `id`로 분류 결과를 저장한다.
+- Anthropic을 호출하지 마라. 이유: 이 모듈은 순수 함수 관문이고, 호출은 step10의 범위다.
+- 기존 테스트를 깨뜨리지 마라.

@@ -1,101 +1,174 @@
-# Step 6: parse-api
+# Step 6: supabase-schema
 
 ## 읽어야 할 파일
 
-먼저 아래 파일들을 읽고 프로젝트의 아키텍처와 설계 의도를 파악하라:
-
-- `/CLAUDE.md`
-- `/docs/ARCHITECTURE.md` (업로드 → 분류 데이터 흐름 절)
-- `/docs/ADR.md` (특히 ADR-003)
-- `/src/lib/csv/` 전체
-- `/src/lib/redact.ts`
-- `/src/services/anthropic/` 전체
-- `/src/services/supabase/` 전체
-- `/src/types/` 전체
+- `/CLAUDE.md` — 보안 규칙 전체
+- `/docs/ARCHITECTURE.md` — 데이터 모델과 RLS 절
+- `/docs/ADR.md` — ADR-004, ADR-016, ADR-018
+- `/src/types/db.ts`, `/src/types/domain.ts`, `/src/types/tier.ts` (step1 — 컬럼명·타입을 여기에 맞춘다)
+- `/.env.example`
 
 ## 작업
 
-`src/app/api/parse/route.ts`에 `POST /api/parse`를 구현한다.
+`supabase/migrations/`에 스키마 마이그레이션 SQL을 작성하고, Supabase 클라이언트 래퍼를 만든다.
 
-### 계약
+**실제 Supabase 프로젝트에 적용하지 않는다.** 로컬 파일만 만든다. 적용은 step18에서 사용자가 한다. Supabase CLI를 설치할 필요도 없다.
 
-요청: `multipart/form-data`, 필드명 `file`.
+### 1. `supabase/migrations/0001_initial.sql`
 
-응답 (200):
-```ts
-{
-  fingerprint: string;
-  issuerLabel: string;
-  encoding: "utf-8" | "cp949";
-  transactions: Transaction[];
-  mappingSource: "cache" | "inferred";   // 관측용. 캐시 적중률을 알아야 한다
-}
+#### 테이블
+
+`docs/ARCHITECTURE.md`의 데이터 모델 절을 그대로 옮긴다.
+
+- `profiles` — `id uuid primary key references auth.users(id) on delete cascade`, `tier text not null default 'free' check (tier in ('free','pro'))`, `sample_used boolean not null default false`, `polar_customer_id text`, `polar_subscription_id text`, `current_period_end timestamptz`
+- `analyses` — `owner_id uuid not null references auth.users(id) on delete cascade`, `card_label text`, `fingerprint text not null`, `source_kind text not null check (source_kind in ('csv','xlsx'))`, `row_count int not null`, `classified_at timestamptz`, `created_at timestamptz not null default now()`
+- `transactions` — `analysis_id uuid not null references analyses(id) on delete cascade`, `owner_id uuid not null`, `occurred_on date not null`, `merchant text not null`, `amount_krw bigint not null`, `classification text check (classification in ('business','personal','review'))`, `account_code text`, `confidence real`, `is_user_edited boolean not null default false`, `rule_id uuid references user_rules(id) on delete set null`
+- `user_rules` — `owner_id uuid not null`, `merchant_pattern text not null`, `classification text not null`, `account_code text`, `created_at timestamptz not null default now()`
+- `usage_counters` — `owner_id uuid not null`, `period text not null` (`'YYYY-MM'`), `classify_used int not null default 0`, `chat_used int not null default 0`, primary key `(owner_id, period)`
+
+`transactions.rule_id`가 `user_rules`를 참조하므로 **`user_rules`를 `transactions`보다 먼저 생성한다.**
+
+**`amount_krw`는 `bigint`다.** `numeric`이나 `real`을 쓰지 마라. 이유: 원 단위 정수이며, 부동소수점 타입은 합계에 오차를 만든다.
+
+`account_code`에는 `src/types/domain.ts`의 `AccountCode` 12개 값을 `check` 제약으로 건다. 이유: 타입과 DB가 어긋나면 AI가 지어낸 계정과목이 그대로 저장된다.
+
+#### 제약
+
+- `unique (owner_id, fingerprint)` on `analyses` — 중복 업로드 감지
+- `unique (owner_id, merchant_pattern)` on `user_rules` — 같은 가맹점에 규칙이 둘 생기지 않게. 재수정은 upsert
+- 조회용 인덱스: `transactions(analysis_id)`, `transactions(owner_id, occurred_on)`, `analyses(owner_id, created_at desc)`
+
+#### `profiles` 자동 생성 트리거
+
+`auth.users`에 INSERT가 일어나면 `profiles` 행을 `tier='free'`로 만드는 트리거를 건다.
+
+이게 없으면 쿼터 판정이 null로 무너진다. 익명 사용자도 `auth.users`에 들어가므로 이 트리거를 타야 한다.
+
+#### 함수 3개
+
+세 함수 모두 `security definer`, `search_path` 고정.
+
+```sql
+create or replace function public.effective_tier(uid uuid) returns text
+-- tier='pro' AND current_period_end > now() 이면 'pro', 아니면 'free'
+
+create or replace function public.increment_usage(kind text) returns int
+-- auth.uid()와 서버 시각 기준 'YYYY-MM'으로 usage_counters upsert,
+-- kind에 해당하는 컬럼을 원자적으로 +1 하고 갱신된 값을 반환한다.
+-- uid와 period를 인자로 받지 마라 — 호출자가 남의 것을 조작할 수 있다.
+
+create or replace function public.mark_sample_used() returns void
+-- auth.uid()의 profiles.sample_used 를 true 로 설정한다. 되돌리는 함수는 만들지 마라.
 ```
 
-에러는 `{ error: { code: string; message: string } }` 형태로 4xx/5xx와 함께 반환한다. `code`는 클라이언트가 분기할 수 있는 안정적 문자열이어야 한다 (예: `ENCODING_FAILED`, `HEADER_NOT_FOUND`, `MAPPING_INFERENCE_FAILED`, `FILE_TOO_LARGE`, `TOO_MANY_TRANSACTIONS`).
+**`effective_tier` 판정은 여기 한 곳에만 존재한다.** 애플리케이션 코드에서 다시 구현하지 마라.
 
-### 흐름
+`increment_usage`가 `uid`를 인자로 받지 않는 이유: 인자로 받으면 클라이언트가 남의 uid를 넣어 카운터를 소진시킬 수 있다. 함수 안에서 `auth.uid()`를 읽는다.
 
-1. 파일 크기 검사. 10MB 초과 시 `FILE_TOO_LARGE`로 413. 이유: 카드 명세서는 이보다 클 이유가 없고, 무제한 업로드는 DoS 경로다.
-2. `decodeBuffer`로 디코딩.
-3. `splitRows`로 2차원 배열화.
-4. `findHeaderRow` → `computeFingerprint`.
-5. `column_mappings`에서 fingerprint 조회.
-   - **적중**: 저장된 매핑으로 `applyMapping`. AI 호출 없음. `mappingSource: "cache"`.
-   - **미스**: `inferColumnMapping(rows.slice(0, 20), encoding)` 호출 → 결과를 `column_mappings`에 저장(service role 필요) → `applyMapping`. `mappingSource: "inferred"`.
-6. 거래 건수가 호출자 티어 상한을 넘으면 `TOO_MANY_TRANSACTIONS`로 400. 티어 판별과 쿼터 소비는 step 7·8에서 다루므로, 이 step에서는 **상한 검사만** 하고 `TIER_LIMITS`의 `maxTransactionsPerUpload`를 참조한다. 인증 사용자면 `profiles.tier`, 아니면 `"anonymous"`로 본다.
-7. 거래 배열을 반환한다.
+#### RLS
 
-### 저장하지 않는다
+5개 테이블 전부 `enable row level security`.
 
-이 라우트는 **DB에 거래를 저장하지 않는다.** 이유: 익명 체험(step 11)도 같은 라우트를 쓰는데, 익명 사용자의 거래는 저장 대상이 아니다. 저장은 분류 확정 후 별도 경로에서 한다.
+**테이블마다 사용자에게 주는 권한이 다르다. 일괄로 걸지 마라.**
 
-원본 CSV를 Storage에 올리는 것도 이 step 범위 밖이다 — 인증된 사용자 흐름이 완성되는 시점에 붙인다.
+| 테이블 | SELECT | INSERT | UPDATE | DELETE |
+|---|---|---|---|---|
+| `analyses` | O | O | O | O |
+| `transactions` | O | O | O | O |
+| `user_rules` | O | O | O | O |
+| `profiles` | O | X (트리거가 만든다) | 제한적 — 아래 참조 | X |
+| `usage_counters` | O | **X** | **X** | **X** |
 
-### 매핑 저장 시 경합
+허용하는 곳에는 `using (owner_id = auth.uid())`와 **`with check (owner_id = auth.uid())`** 를 둘 다 건다. `profiles`는 `id = auth.uid()`가 기준이다.
 
-같은 카드사 파일을 두 사용자가 동시에 올리면 두 번 추론되어 같은 fingerprint로 두 번 insert될 수 있다. `on conflict (fingerprint) do nothing`으로 처리하라. 예외를 던지지 마라 — 사용자에게는 아무 문제가 없는 상황이다.
+> SELECT 정책만 걸고 끝내지 마라. `with check`가 없으면 남의 `owner_id`로 INSERT가 통과한다.
 
-### 추론 실패 폴백
+##### `usage_counters` — 사용자는 쓸 수 없다
 
-`inferColumnMapping`이 실패하거나 검증에서 탈락하면 `MAPPING_INFERENCE_FAILED`로 422를 반환한다. 임의로 "0번이 날짜, 1번이 가맹점" 같은 추측을 하지 마라 — 잘못된 매핑은 조용히 틀린 금액을 만든다.
+SELECT만 허용하고 INSERT·UPDATE·DELETE 정책을 **만들지 않는다.** 쓰기는 `increment_usage` 함수(security definer)만 한다.
+
+> 이게 없으면 사용자가 `update usage_counters set classify_used = 0`을 직접 실행해 **쿼터 관문 전체를 무력화한다.** 무료 사용자가 AI 분류를 무제한으로 쓰게 되며, 비용이 그대로 나간다. 이 프로젝트에서 가장 직접적인 비용 유출 경로다.
+
+DELETE도 막는 이유: 행을 지우면 카운터가 0부터 다시 시작한다. UPDATE를 막고 DELETE를 열어두면 같은 구멍이다.
+
+##### `profiles` — 사용자가 바꿀 수 없는 컬럼
+
+```sql
+revoke update (tier, current_period_end, sample_used,
+               polar_customer_id, polar_subscription_id)
+  on public.profiles from authenticated;
+```
+
+- `tier`·`current_period_end` — 사용자가 자기 행을 UPDATE해 Pro가 되면 결제가 무의미하다
+- `sample_used` — `false`로 되돌리면 익명 표본 분류를 무한히 쓴다
+- `polar_*` — 남의 구독 ID를 자기 행에 넣는 통로가 된다
+
+이 컬럼들의 갱신 주체는 웹훅·`billing/sync`(service role)와 `mark_sample_used` 함수뿐이다. service role은 `authenticated` 롤이 아니므로 이 revoke의 영향을 받지 않는다.
+
+### 2. `src/lib/supabase/browser.ts`
+
+`createBrowserClient`(`@supabase/ssr`) 래퍼. `NEXT_PUBLIC_SUPABASE_URL`·`NEXT_PUBLIC_SUPABASE_ANON_KEY`만 쓴다.
+
+### 3. `src/lib/supabase/server.ts`
+
+`createServerClient` 래퍼. Next 16의 `cookies()`를 사용한다. Server Component와 라우트 핸들러 양쪽에서 쓰인다.
+
+### 4. `src/lib/supabase/admin.ts`
+
+service role 클라이언트. **파일 상단에 사용처를 못 박는 주석을 단다.**
+
+```ts
+// 이 클라이언트는 RLS를 우회한다.
+// 유일한 사용처: src/app/api/webhooks/polar/route.ts 의 tier 갱신 (step17)
+// 그 외 어디서도 import 하지 마라.
+```
+
+`serverEnv('SUPABASE_SERVICE_ROLE_KEY')`를 **호출 시점에** 읽는다(step0의 `src/lib/env.ts`). 모듈 로드 시점에 읽으면 키 없는 빌드가 깨진다.
 
 ### 테스트
 
-`src/app/api/parse/__tests__/route.test.ts`. Anthropic·Supabase 서비스를 모킹한다.
+래퍼 3개는 팩토리 함수라 얇게 테스트한다 — `@supabase/ssr`을 모킹하고, 올바른 환경변수 키로 호출되는지와 admin이 로드 시점에 `process.env`를 읽지 않는지를 검증한다. **실제 Supabase에 접속하지 마라.**
 
-- 캐시 적중 시 Anthropic이 호출되지 않는지 (**핵심 회귀 테스트** — ADR-003의 비용 절감이 여기 달려 있다)
-- 캐시 미스 시 추론 후 매핑이 저장되는지
-- 10MB 초과 파일이 413인지
-- 거래 건수 초과가 400인지
-- 추론 실패가 422이고 폴백 추측을 하지 않는지
+SQL 자체는 테스트하지 않는다. 대신 검증 절차의 `grep` 체크리스트로 고정한다.
 
 ## Acceptance Criteria
 
 ```bash
-npm run build   # 컴파일 에러 없음
-npm test        # 신규 테스트 포함 전부 통과
-npm run lint    # 에러 없음
+npm run lint
+npm run build
+npm run test
+npx vitest run src/lib/supabase
 ```
 
 ## 검증 절차
 
 1. 위 AC 커맨드를 실행한다.
-2. 아키텍처 체크리스트를 확인한다:
-   - 라우트가 `src/app/api/parse/route.ts`에 있는가?
-   - Anthropic 호출이 서비스 래퍼를 통해서만 일어나는가?
-   - 캐시 적중 시 AI 호출이 0인가?
-   - CLAUDE.md CRITICAL 규칙을 위반하지 않았는가?
+2. 아키텍처 체크리스트:
+   - `grep -c "with check" supabase/migrations/0001_initial.sql` 이 테이블 수 이상인가?
+   - `grep -n "enable row level security" supabase/migrations/0001_initial.sql` 이 5줄인가?
+   - `grep -n "amount_krw" supabase/migrations/0001_initial.sql` 의 타입이 `bigint`인가?
+   - `grep -n "numeric\|float\|real" supabase/migrations/0001_initial.sql` — `confidence` 외에 없는가?
+   - `effective_tier`·`increment_usage`·`mark_sample_used` 세 함수가 전부 있는가?
+   - `increment_usage`가 `uid`를 인자로 받지 **않는가**? (함수 안에서 `auth.uid()`를 읽어야 한다)
+   - `usage_counters`에 INSERT·UPDATE·DELETE 정책이 **없는가**?
+   - `revoke update` 목록에 `tier`·`current_period_end`·`sample_used`·`polar_*`가 전부 있는가?
+   - `admin.ts`에 사용처 제한 주석이 있는가?
 3. 결과에 따라 `phases/0-mvp/index.json`의 step 6을 업데이트한다:
-   - 성공 → `"status": "completed"`, `"summary": "산출물 한 줄 요약"`
-   - 수정 3회 시도 후에도 실패 → `"status": "error"`, `"error_message": "구체적 에러 내용"`
-   - 사용자 개입 필요 → `"status": "blocked"`, `"blocked_reason": "구체적 사유"` 후 즉시 중단
+   - 성공 → `"status": "completed"`, `"summary"`에 마이그레이션 파일 경로, 테이블 5개 이름, 래퍼 3개 경로를 한 줄로
+   - 실패 → `"status": "error"` + `"error_message"`
+   - 사용자 개입 필요 → `"status": "blocked"` + `"blocked_reason"` 후 중단
 
 ## 금지사항
 
-- 캐시 적중 시에도 AI를 호출하지 마라. 이유: ADR-003 전체가 무의미해지고 원가가 사용자 수에 비례해 증가한다.
-- 컬럼 매핑 추론이 실패했을 때 기본 매핑을 추측하지 마라. 이유: 잘못된 컬럼을 금액으로 읽으면 사용자가 틀린 숫자를 세무 신고에 쓴다.
-- 이 라우트에서 거래를 DB에 저장하지 마라. 이유: 익명 체험도 같은 라우트를 쓰며, 저장 대상이 아니다.
-- 파일 크기 상한 없이 업로드를 받지 마라.
-- `Transaction.rawRow`를 응답에 포함할 때 마스킹 여부를 확인하라. 클라이언트로 나가는 데이터에도 카드번호가 있으면 안 된다.
-- 기존 테스트를 깨뜨리지 마라
+- 실제 Supabase 프로젝트에 마이그레이션을 적용하지 마라. 이유: 키가 없어 blocked가 되고 이후 step이 전부 멈춘다. 적용은 step18에서 사용자가 한다.
+- `DROP TABLE`을 쓰지 마라. 이유: 훅이 차단하고, 데이터 손실 경로를 남기지 않는다.
+- SELECT 정책만 만들고 끝내지 마라. 이유: `with check`가 없으면 남의 `owner_id`로 INSERT가 통과한다.
+- `amount_krw`에 `numeric`·`real`·`double precision`을 쓰지 마라. 이유: 통화 합계에 오차가 생긴다.
+- 사용자가 `profiles.tier`·`sample_used`를 UPDATE할 수 있게 두지 마라. 이유: 결제 없이 Pro가 되고, 익명 표본 분류를 무한히 쓴다.
+- `usage_counters`에 사용자 INSERT·UPDATE·DELETE 정책을 만들지 마라. 이유: 사용자가 카운터를 0으로 되돌려 쿼터 관문 전체를 무력화한다. 쓰기는 `increment_usage` 함수만 한다.
+- `increment_usage`가 `uid`나 `period`를 인자로 받게 하지 마라. 이유: 남의 카운터를 소진시키는 통로가 된다.
+- RLS 정책을 5개 테이블에 일괄로 걸지 마라. 이유: `usage_counters`와 `profiles`는 사용자 쓰기 권한이 다르다.
+- `admin.ts`를 웹훅 외의 곳에서 쓰지 마라. 이유: RLS가 무력화되어 모든 사용자 데이터가 노출된다.
+- 애플리케이션 코드에 티어 판정을 다시 구현하지 마라. 이유: `effective_tier` 함수와 어긋나는 순간 게이팅이 깨진다.
+- 카드번호 컬럼을 만들지 마라. 이유: 저장하지 않기로 한 데이터다. 컬럼이 있으면 언젠가 채워진다.
+- 기존 테스트를 깨뜨리지 마라.

@@ -1,120 +1,113 @@
-# Step 7: rules-and-quota
+# Step 7: auth-session
 
 ## 읽어야 할 파일
 
-먼저 아래 파일들을 읽고 프로젝트의 아키텍처와 설계 의도를 파악하라:
-
-- `/CLAUDE.md` (비용 규칙 절)
-- `/docs/ADR.md` (특히 ADR-008, ADR-009, ADR-012)
-- `/src/types/` 전체
-- `/src/services/supabase/` 전체
-- `/supabase/migrations/` 전체 (step 5에서 생성)
+- `/CLAUDE.md` — 인증 규칙
+- `/docs/ARCHITECTURE.md` — "인증 — 두 개의 진입 경로" 절
+- `/docs/ADR.md` — ADR-016
+- `/src/lib/supabase/browser.ts`, `/src/lib/supabase/server.ts` (step6 산출물)
+- `/supabase/migrations/0001_initial.sql` (step6 — `effective_tier` 함수)
+- `/src/types/domain.ts`, `/src/types/tier.ts` (step1)
 
 ## 작업
 
-AI 호출 앞에 세울 두 개의 관문을 구현한다. **이 step에서는 분류 API를 건드리지 않는다** — 관문만 만들고, 연결은 step 8에서 한다.
+인증 **인프라**를 만든다. 이 step이 여기 있는 이유: 다음 step(`analyze-api`)이 `auth.uid()`를 필요로 하고, 랜딩 업로드도 세션이 먼저 있어야 한다. 연결 플로우(Google)는 step12에서 한다.
 
-### `src/lib/rules.ts`
+### 1. `src/middleware.ts` — 세션 갱신
 
-```ts
-export function applyRules(
-  transactions: Transaction[],
-  rules: UserRule[],
-): { classified: Classification[]; remaining: Transaction[] };
-```
-
-동작:
-- 각 거래를 규칙과 대조한다. `merchant_exact`는 가맹점명 완전 일치, `merchant_contains`는 부분 문자열 포함.
-- 매칭되면 `Classification`을 만들고 `source: "rule"`, `confidence: 1`, `reason`은 어떤 규칙이 적용됐는지 한 문장으로 적는다.
-- 매칭 안 된 거래는 `remaining`에 담는다. **`remaining`만 AI로 간다** — 이것이 ADR-008의 원가 절감 메커니즘이다.
-- 여러 규칙이 매칭되면 `merchant_exact`를 `merchant_contains`보다 우선한다. 같은 타입 안에서는 `pattern`이 긴 쪽을 우선한다(더 구체적이므로).
-- 비교는 공백 정규화 + 대소문자 무시로 한다. 한글에는 영향 없지만 영문 가맹점명(`GS25` vs `gs25`)에서 필요하다.
-
-`classified.length + remaining.length === transactions.length`가 항상 성립해야 한다. 거래가 사라지거나 중복되면 안 된다.
-
-### `src/lib/quota.ts`
+`@supabase/ssr`은 미들웨어에서 세션 쿠키를 갱신하는 것이 전제다. 이게 없으면 Server Component가 만료된 세션을 보게 된다.
 
 ```ts
-export type QuotaKind = "analysis" | "chat";
-
-export interface QuotaCheck {
-  allowed: boolean;
-  used: number;
-  limit: number;
-  resetAt: string | null;   // 익명은 null
-}
-
-export async function checkQuota(userId: string, kind: QuotaKind): Promise<QuotaCheck>;
-export async function consumeQuota(userId: string, kind: QuotaKind): Promise<void>;
-export async function checkAnonymousTrial(fingerprintHash: string): Promise<boolean>;
-export async function consumeAnonymousTrial(fingerprintHash: string): Promise<void>;
+export async function middleware(request: NextRequest): Promise<NextResponse>
+export const config = { matcher: [/* 정적 자산·이미지·favicon 제외 */] }
 ```
 
-요구사항:
+- `createServerClient`로 쿠키를 읽고 `supabase.auth.getUser()`를 호출해 세션을 갱신한다
+- 응답에 갱신된 쿠키를 반드시 다시 심는다
+- **여기서 `signInAnonymously()`를 호출하지 마라.** 이유: 미들웨어는 모든 요청에 걸리므로 랜딩을 스쳐간 크롤러까지 계정을 만든다
 
-- 기간 키는 `YYYY-MM` (UTC 아닌 Asia/Seoul 기준). 이유: 한국 사용자에게 "이번 달"은 KST 기준이다.
-- `consumeQuota`는 **원자적**이어야 한다. `select` 후 `update`로 나누면 동시 요청에서 쿼터를 초과한다. Postgres의 `insert ... on conflict do update set analyses = usage_counters.analyses + 1`로 단일 문장 처리하라.
-- `checkQuota`와 `consumeQuota`를 분리한 이유: 호출자는 먼저 검사해 사용자에게 안내하고, 실제 AI 호출이 성공한 뒤 소비를 확정할 수 있어야 한다. AI가 실패했는데 쿼터가 깎이면 안 된다.
-- `checkAnonymousTrial`은 `anonymous_trials`에 해당 해시가 있으면 `false`를 반환한다.
-- `TIER_LIMITS`(step 1)를 단일 진실 공급원으로 쓴다. 숫자를 이 파일에 다시 적지 마라.
+**TDD 가드 주의**: `src/middleware.ts`는 테스트 선행 대상이다. `src/middleware.test.ts`를 먼저 작성하라. Supabase 클라이언트를 모킹하고, matcher가 정적 경로를 제외하는지와 쿠키가 응답에 실리는지를 검증한다.
 
-### `src/lib/fingerprint-visitor.ts`
+### 2. `src/lib/supabase/auth.ts` — 경로 분기 판정
 
-익명 체험 1회 제한용 방문자 지문 (ADR-012).
+이 프로젝트의 인증 판정은 **전부 이 파일에서만** 한다. 다른 곳에 복제하지 마라.
 
 ```ts
-export function computeVisitorHash(ip: string, userAgent: string): string;
+export type AuthRoute = 'link' | 'signin'
+
+/** 현재 세션이 익명이고 귀속되지 않은 결과를 들고 있으면 'link', 아니면 'signin' */
+export function decideAuthRoute(params: {
+  isAnonymous: boolean
+  hasPendingAnalysis: boolean
+}): AuthRoute
+
+/** 파일 드롭 시점에 호출. 이미 세션이 있으면 아무것도 하지 않는다. */
+export async function ensureSession(): Promise<{ userId: string; isAnonymous: boolean }>
+
+/** 현재 사용자가 익명인지. user.is_anonymous 로 판정한다. */
+export function isAnonymousUser(user: User | null): boolean
 ```
 
-`ip + "|" + userAgent + "|" + 서버 시크릿`을 SHA-256 해시한다. 서버 시크릿은 환경변수 `VISITOR_HASH_SALT`에서 읽고, `.env.example`에 항목을 추가하라.
+`decideAuthRoute`의 규칙:
+- `isAnonymous && hasPendingAnalysis` → `'link'`
+- 그 외 → `'signin'`
 
-**원본 IP를 반환하거나 로깅하지 마라.** 해시만 밖으로 나간다. IP는 개인정보이며, 우리가 보관할 이유는 중복 방지뿐이므로 해시로 충분하다.
+> 이 판정이 틀리면 사용자가 분석을 잃는다. 익명 세션에 결과가 있는데 `signInWithOAuth()`를 부르면 **새 계정이 만들어지고 uid가 버려진다.** 반드시 테스트로 고정하라.
 
-이 방어는 완벽하지 않다 (VPN·시크릿 창으로 우회 가능). 목적은 우발적 반복과 저비용 남용을 막는 것이지 결정적 차단이 아니다. 과도한 우회 방지 로직을 추가하지 마라.
+`ensureSession`은 **파일 드롭 시점에만** 호출되도록 만든다. 이 함수 자체는 세션이 없을 때만 `signInAnonymously()`를 호출하고, 있으면 현재 세션을 반환한다.
+
+### 3. `src/lib/supabase/session.ts` — 서버 측 헬퍼
+
+```ts
+/** 라우트 핸들러·Server Component에서 현재 사용자. 없으면 null */
+export async function getCurrentUser(): Promise<User | null>
+
+/** 없으면 401을 던지는 버전. 라우트 핸들러용 */
+export async function requireUser(): Promise<User>
+
+/** effective_tier DB 함수를 호출한다. 판정 로직을 여기서 다시 구현하지 마라. */
+export async function getEffectiveTier(userId: string): Promise<Tier>
+```
+
+`getEffectiveTier`는 step6에서 만든 `public.effective_tier(uid)` 함수를 RPC로 호출한다. **`tier`와 `current_period_end`를 가져와 애플리케이션에서 비교하지 마라.** 이유: 판정이 두 곳에 존재하면 반드시 어긋난다.
 
 ### 테스트
 
-`src/lib/__tests__/rules.test.ts`, `src/lib/__tests__/quota.test.ts`. Supabase는 모킹한다.
+Supabase 클라이언트를 모킹한다. 실제 서비스에 접속하지 마라.
 
-`rules.test.ts` 필수 케이스:
-- exact가 contains보다 우선하는지
-- 같은 타입에서 긴 패턴이 우선하는지
-- 대소문자·공백 차이를 흡수하는지
-- **`classified + remaining` 합이 입력과 정확히 일치하는지** (거래 유실 회귀 방지)
-- 규칙이 없으면 전부 `remaining`인지
-
-`quota.test.ts` 필수 케이스:
-- 한도 도달 시 `allowed: false`
-- 티어별 한도가 `TIER_LIMITS`를 따르는지
-- `consumeQuota`가 단일 SQL 문으로 증가시키는지 (모킹된 호출 검사)
+- `decideAuthRoute` 네 조합 전부
+- `ensureSession`이 기존 세션이 있을 때 `signInAnonymously`를 부르지 않는지
+- `requireUser`가 미인증에서 던지는지
+- `getEffectiveTier`가 RPC를 호출하는지 (직접 비교 로직이 없는지)
+- `isAnonymousUser`가 `user.is_anonymous`를 보는지
 
 ## Acceptance Criteria
 
 ```bash
-npm run build   # 컴파일 에러 없음
-npm test        # 신규 테스트 포함 전부 통과
-npm run lint    # 에러 없음
+npm run lint
+npm run build
+npm run test
+npx vitest run src/lib/supabase src/middleware.test.ts
 ```
 
 ## 검증 절차
 
 1. 위 AC 커맨드를 실행한다.
-2. 아키텍처 체크리스트를 확인한다:
-   - 코드가 `src/lib/`에 있는가?
-   - `TIER_LIMITS`가 중복 정의되지 않았는가?
-   - `consumeQuota`가 원자적인가?
-   - 원본 IP가 어디에도 저장·로깅되지 않는가?
+2. 아키텍처 체크리스트:
+   - `grep -rn "signInAnonymously" src/` 결과가 `src/lib/supabase/auth.ts`에만 나오는가? (미들웨어·layout·page에 있으면 위반)
+   - `getEffectiveTier`가 RPC를 호출하고, `current_period_end`를 직접 비교하지 않는가?
+   - 미들웨어가 응답에 갱신된 쿠키를 실어 보내는가?
 3. 결과에 따라 `phases/0-mvp/index.json`의 step 7을 업데이트한다:
-   - 성공 → `"status": "completed"`, `"summary": "산출물 한 줄 요약"`
-   - 수정 3회 시도 후에도 실패 → `"status": "error"`, `"error_message": "구체적 에러 내용"`
-   - 사용자 개입 필요 → `"status": "blocked"`, `"blocked_reason": "구체적 사유"` 후 즉시 중단
+   - 성공 → `"status": "completed"`, `"summary"`에 미들웨어·auth·session의 공개 함수를 한 줄로
+   - 실패 → `"status": "error"` + `"error_message"`
+   - 사용자 개입 필요 → `"status": "blocked"` + `"blocked_reason"` 후 중단
 
 ## 금지사항
 
-- `src/app/api/classify/`를 만들거나 수정하지 마라. 이 step은 관문만 만든다. 이유: 관문과 소비처를 같은 step에서 만들면 "쿼터 검사 없는 경로"가 생겼는지 검증하기 어려워진다.
-- `consumeQuota`를 select-then-update로 구현하지 마라. 이유: 동시 요청에서 한도를 넘긴다.
-- 한도 숫자를 `quota.ts`에 하드코딩하지 마라. `TIER_LIMITS`를 참조한다.
-- 원본 IP를 저장하거나 로깅하지 마라.
-- 정규식 기반 규칙 매칭을 추가하지 마라 (ADR-008, step 1의 타입 정의와 일치시켜라).
-- `applyRules`에서 거래를 드롭하지 마라. 입력과 출력 개수가 반드시 일치해야 한다.
-- 기존 테스트를 깨뜨리지 마라
+- 미들웨어나 layout/page에서 `signInAnonymously()`를 호출하지 마라. 이유: 랜딩을 스쳐간 방문자·크롤러까지 `auth.users` 행을 만든다. 파일 드롭 시점에만 만든다.
+- `signInWithOAuth()`나 `linkIdentity()`를 여기서 구현하지 마라. 이유: step12의 범위다. 여기서는 **어느 쪽을 쓸지 판정하는 함수만** 만든다.
+- 티어 판정 로직(`tier === 'pro' && end > now()`)을 애플리케이션 코드로 다시 쓰지 마라. 이유: DB 함수와 어긋나는 순간 게이팅이 깨진다.
+- 쿼터 검사를 여기서 하지 마라. 이유: step9의 범위다.
+- 실제 Supabase에 접속하는 테스트를 쓰지 마라. 이유: 키가 없어 blocked가 되고 이후 step이 전부 멈춘다.
+- UI를 만들지 마라. 이유: step13의 범위다.
+- 기존 테스트를 깨뜨리지 마라.

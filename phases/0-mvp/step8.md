@@ -1,117 +1,97 @@
-# Step 8: classify-api
+# Step 8: analyze-api
 
 ## 읽어야 할 파일
 
-먼저 아래 파일들을 읽고 프로젝트의 아키텍처와 설계 의도를 파악하라:
-
-- `/CLAUDE.md` (CRITICAL 전체 + 비용 규칙)
-- `/docs/ARCHITECTURE.md`
-- `/docs/ADR.md` (특히 ADR-004, ADR-006, ADR-007, ADR-008, ADR-009)
-- `/src/lib/rules.ts`, `/src/lib/quota.ts` (step 7)
-- `/src/lib/redact.ts`
-- `/src/services/anthropic/` 전체
-- `/src/app/api/parse/route.ts` (step 6 — 에러 응답 형식을 맞춘다)
+- `/CLAUDE.md` — 보안·데이터흐름 규칙
+- `/docs/ARCHITECTURE.md` — API 계약과 분석 파이프라인 1단계
+- `/docs/ADR.md` — ADR-006(브라우저 전처리), ADR-014(3단계 분리)
+- `/src/types/api.ts`, `/src/types/analysis.ts`, `/src/types/tier.ts` (step1 — `AnalyzeRequest`, `AnalyzeResponse`, `MAX_ROWS`)
+- `/src/lib/analysis/index.ts` (step4 — `summarize`, `computeFingerprint`)
+- `/src/lib/supabase/server.ts`, `/src/lib/supabase/session.ts` (step6·7)
 
 ## 작업
 
-`src/app/api/classify/route.ts`에 `POST /api/classify`를 구현한다. step 7에서 만든 관문을 여기서 연결한다.
+`src/app/api/analyze/route.ts`에 `POST /api/analyze`를 구현한다. 파이프라인 1단계(집계)를 배선하는 step이다.
 
-### 계약
+**TDD 가드 주의**: `route.ts`는 테스트 선행 대상이다. `src/app/api/analyze/route.test.ts`를 **먼저** 작성하라.
 
-요청:
-```ts
-{ transactions: Transaction[] }
+### 처리 순서
+
+```
+1. requireUser()            — 미인증이면 401
+2. 본문 파싱 + 검증          — rows 배열, 각 필드 타입, MAX_ROWS 상한
+3. computeFingerprint(rows)
+4. 중복 조회                 — (owner_id, fingerprint)로 기존 analyses 검색
+   └ 있으면: 저장하지 않고 { ok:false, reason:'duplicate', existingId } 반환
+5. summarize(rows)          — 서버가 직접 계산
+6. 저장                      — analyses 1행 + transactions N행 (한 트랜잭션처럼)
+                              classification·account_code·confidence 는 전부 null
+7. { ok:true, analysisId, summary } 반환
 ```
 
-응답 (200):
-```ts
-{
-  classifications: Classification[];
-  stats: {
-    total: number;
-    fromRules: number;      // AI를 거치지 않은 건수
-    fromAi: number;
-    uncertainCount: number; // 확인 필요 섹션에 들어갈 건수
-  };
-  quota: { used: number; limit: number; resetAt: string | null };
-}
-```
+**6번에서 `classification`을 채우지 마라.** 이 엔드포인트는 분류하지 않는다. 분류는 step11의 `/api/analyses/:id/classify`가 한다.
 
-에러는 step 6과 동일한 `{ error: { code, message } }` 형식. 코드 예: `QUOTA_EXCEEDED`(429), `TRIAL_ALREADY_USED`(429), `CLASSIFICATION_FAILED`(502).
+### 검증 규칙
 
-### 흐름 — 순서를 바꾸지 마라
+- `rows`가 배열이 아니거나 비어 있으면 400
+- 행 수가 `MAX_ROWS`(10,000) 초과면 400. 조용히 자르지 마라
+- 각 행: `occurredOn`이 `YYYY-MM-DD` 형태, `merchant`가 비어 있지 않은 문자열, `amountKrw`가 **정수**. 하나라도 아니면 400
+- 본문 크기 상한도 확인한다
 
-1. **인증 판별.** 세션이 있으면 `userId` + `profiles.tier`, 없으면 익명.
-2. **쿼터 검사.**
-   - 인증: `checkQuota(userId, "analysis")`. 실패 시 429 `QUOTA_EXCEEDED`.
-   - 익명: `computeVisitorHash(ip, ua)` → `checkAnonymousTrial`. 실패 시 429 `TRIAL_ALREADY_USED`.
-   - 익명 요청의 거래 수가 `TIER_LIMITS.anonymous.maxTransactionsPerUpload`를 넘으면 400.
-3. **규칙 선적용.** 익명은 규칙이 없으므로 건너뛴다. 인증 사용자는 `user_rules`를 조회해 `applyRules`.
-4. **AI 분류.** `remaining`이 비어 있으면 AI를 호출하지 마라 — 규칙만으로 전부 분류된 경우다. 이때도 쿼터는 소비하지 않는다.
-5. **쿼터 소비.** AI 호출이 성공한 뒤에만 `consumeQuota` / `consumeAnonymousTrial`. AI가 실패했는데 쿼터가 깎이면 안 된다.
-6. **병합.** `classified`(규칙) + AI 결과를 합쳐 원래 거래 순서대로 정렬해 반환한다.
+**클라이언트가 보낸 집계·총액을 받지 마라.** 요청은 `rows`·`cardLabel`·`sourceKind`뿐이다. 이유: 클라이언트 계산을 신뢰하면 화면에 뜬 금액이 서버 기록과 달라진다.
 
-### 확신도 임계값
+### `owner_id`
 
-`confidence < 0.7`인 건은 `label`을 강제로 `"uncertain"`으로 바꾼다 (ADR-007). 임계값은 `src/lib/constants.ts`에 상수로 두어 나중에 조정 가능하게 하라.
-
-AI가 `business`라고 했지만 확신도가 낮은 경우, 원래 라벨을 버리지 말고 `reason`에 "AI 추정: 사업경비(확신도 낮음)" 형태로 남겨 사용자가 판단할 근거를 준다.
+`transactions`와 `analyses`의 `owner_id`는 **서버가 `auth.uid()`에서 채운다.** 요청 본문에서 읽지 마라. 이유: 남의 `owner_id`로 삽입하려는 시도를 애초에 차단한다(RLS `WITH CHECK`가 2차 방어).
 
 ### 저장
 
-인증 사용자의 경우에만 `transactions`와 `classifications`를 DB에 저장한다. 익명은 저장하지 않는다.
-
-`uploads` 레코드도 여기서 만든다. `storage_path`는 이 step에서 null로 둔다 (원본 업로드는 이 phase 범위 밖).
-
-저장은 트랜잭션으로 묶어라. 거래는 저장됐는데 분류가 실패해 고아 레코드가 남으면 안 된다.
-
-### 부분 실패 처리
-
-AI 배치 중 일부가 실패하면, 성공한 배치의 결과는 살리고 실패한 거래는 `label: "uncertain"`, `confidence: 0`, `reason: "분류 실패 — 다시 시도해 주세요"`로 채워 반환한다. 전체를 502로 버리지 마라 — 사용자가 300건 중 280건의 결과를 잃는다.
-
-단, **전 배치가 실패한 경우**에는 502 `CLASSIFICATION_FAILED`를 반환하고 쿼터를 소비하지 마라.
+`analyses` 1행을 만들고 그 id로 `transactions`를 일괄 삽입한다. 삽입 도중 실패하면 `analyses` 행도 남기지 마라 — 고아 분석이 생긴다. Supabase RPC(`plpgsql` 함수)로 묶거나, 실패 시 명시적으로 `analyses`를 삭제한다.
 
 ### 테스트
 
-`src/app/api/classify/__tests__/route.test.ts`. Anthropic·Supabase 모킹.
+Supabase 클라이언트와 `session.ts`를 모킹한다. 실제 DB에 접속하지 마라.
 
-필수 케이스:
-- **쿼터 초과 시 Anthropic이 호출되지 않는지** (핵심 회귀 테스트)
-- **AI 실패 시 쿼터가 소비되지 않는지** (핵심 회귀 테스트)
-- 규칙으로 전부 분류되면 AI 호출 0, 쿼터 소비 0
-- `confidence < 0.7`이 `uncertain`으로 강등되는지
-- 익명 요청이 DB에 저장되지 않는지
-- 부분 실패 시 성공분이 보존되는지
-- 반환된 `classifications` 개수가 입력 거래 수와 일치하는지
+- 미인증 → 401
+- 10,001행 → 400
+- `amountKrw`가 소수 → 400
+- `merchant`가 빈 문자열 → 400
+- 정상 요청 → `ok:true`, `summary` 반환, `owner_id`가 세션 uid로 채워졌는지
+- 저장된 `transactions`의 `classification`이 전부 `null`인지
+- 중복 fingerprint → 저장 호출이 **일어나지 않고** `ok:false, reason:'duplicate'` 반환
+- 요청 본문에 `owner_id`를 넣어도 무시되는지
 
 ## Acceptance Criteria
 
 ```bash
-npm run build   # 컴파일 에러 없음
-npm test        # 신규 테스트 포함 전부 통과
-npm run lint    # 에러 없음
+npm run lint
+npm run build
+npm run test
+npx vitest run src/app/api/analyze
 ```
 
 ## 검증 절차
 
 1. 위 AC 커맨드를 실행한다.
-2. 아키텍처 체크리스트를 확인한다:
-   - 쿼터 검사 없이 Anthropic에 도달하는 경로가 하나도 없는가? (코드를 직접 읽어 확인하라)
-   - 마스킹이 서비스 계층에서 강제되는가?
-   - 익명 사용자의 데이터가 저장되지 않는가?
-   - CLAUDE.md CRITICAL 규칙을 위반하지 않았는가?
+2. 아키텍처 체크리스트:
+   - `grep -n "FormData\|new File(" src/app/api/analyze/route.ts` 가 비어 있는가?
+   - LLM 호출이 없는가? (`grep -rn "anthropic" src/app/api/analyze/`)
+   - `owner_id`를 요청 본문에서 읽지 않는가?
+   - 응답에 `ok` 판별자가 있는가?
+   - `MAX_ROWS`를 `src/types/tier.ts`에서 import 하는가? (하드코딩 금지)
 3. 결과에 따라 `phases/0-mvp/index.json`의 step 8을 업데이트한다:
-   - 성공 → `"status": "completed"`, `"summary": "산출물 한 줄 요약"`
-   - 수정 3회 시도 후에도 실패 → `"status": "error"`, `"error_message": "구체적 에러 내용"`
-   - 사용자 개입 필요 → `"status": "blocked"`, `"blocked_reason": "구체적 사유"` 후 즉시 중단
+   - 성공 → `"status": "completed"`, `"summary"`에 엔드포인트·검증 규칙·중복 처리 방식을 한 줄로
+   - 실패 → `"status": "error"` + `"error_message"`
+   - 사용자 개입 필요 → `"status": "blocked"` + `"blocked_reason"` 후 중단
 
 ## 금지사항
 
-- 쿼터 검사보다 먼저 Anthropic을 호출하지 마라. 이유: 한도를 넘은 사용자가 무제한으로 원가를 발생시킨다.
-- AI 호출 전에 쿼터를 소비하지 마라. 이유: API 장애 시 사용자가 쓰지도 않은 횟수를 잃는다.
-- 규칙 선적용을 건너뛰고 전 거래를 AI로 보내지 마라. 이유: ADR-008의 원가 절감이 사라진다.
-- 부분 실패를 전체 실패로 처리하지 마라. 이유: 사용자가 대부분의 결과를 잃는다.
-- 익명 사용자의 거래를 DB에 저장하지 마라 (ADR-012).
-- 세무 판단 문구를 응답에 추가하지 마라 (ADR-006).
-- 확신도 임계값을 코드 여러 곳에 하드코딩하지 마라. `constants.ts` 한 곳.
-- 기존 테스트를 깨뜨리지 마라
+- 원본 파일을 받지 마라. `FormData`·`File`·`Blob`을 쓰지 마라. 이유: 본문 크기 제한에 걸리고, 카드번호와 원본이 서버에 도달한다. 정규화된 배열만 받는다.
+- **LLM을 호출하지 마라.** 이유: 익명 사용자도 이 엔드포인트를 쓴다. 분류는 step11에서 쿼터 검사를 거쳐 실행한다.
+- `classification`·`account_code`·`confidence`를 채우지 마라. 이유: 이 단계는 분류하지 않는다. 값이 있으면 UI가 분류가 끝난 줄 안다.
+- 클라이언트가 보낸 집계·총액을 신뢰하지 마라. 이유: 화면 금액과 서버 기록이 어긋난다.
+- `owner_id`를 요청 본문에서 읽지 마라. 이유: 남의 데이터로 삽입할 통로가 된다.
+- 상한 초과 시 조용히 잘라내지 마라. 이유: 사용자가 일부만 분석된 줄 모른다.
+- 중복일 때 저장하고 나서 알리지 마라. 이유: 이중 계상이 발생해 시계열이 망가진다. 저장 전에 판정한다.
+- service role 클라이언트를 쓰지 마라. 이유: 이 경로는 사용자 세션으로 RLS 아래서 동작해야 한다.
+- 기존 테스트를 깨뜨리지 마라.

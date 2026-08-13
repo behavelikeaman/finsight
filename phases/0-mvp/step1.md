@@ -2,107 +2,186 @@
 
 ## 읽어야 할 파일
 
-먼저 아래 파일들을 읽고 프로젝트의 아키텍처와 설계 의도를 파악하라:
-
 - `/CLAUDE.md`
-- `/docs/ARCHITECTURE.md`
-- `/docs/ADR.md`
-- `/docs/PRD.md`
-- `/src/` 전체 골격 (step 0에서 생성)
-- `/tsconfig.json`
+- `/docs/ARCHITECTURE.md` — 특히 "데이터 모델"과 "API 계약" 절
+- `/docs/PRD.md` — 요금제와 쿼터 정책
+- `/tsconfig.json`, `/src/lib/env.ts` (step0 산출물)
 
 ## 작업
 
-`src/types/`에 프로젝트 전역 타입을 정의한다. 이 step은 **타입 정의만** 한다. 구현체나 함수는 만들지 않는다.
+`src/types/` 아래에 도메인 타입과 **API 계약 타입 전체**를 정의한다.
 
-### `src/types/transaction.ts`
+이 step이 중요한 이유: 이후 모든 step은 **독립된 세션**에서 실행된다. step13(랜딩)은 step8(analyze-api)이 무엇을 반환하는지 알 방법이 없다. 여기서 정의한 타입이 step 간 유일한 계약이다. 하나라도 빠지면 이후 세션들이 서로 다른 형태를 지어낸다.
 
-정규화된 거래 1건. 카드사 포맷 차이가 모두 흡수된 뒤의 형태다.
+`src/types/`는 TDD 가드 면제 대상이라 테스트 없이 작성할 수 있다.
+
+### `src/types/domain.ts`
 
 ```ts
-export interface Transaction {
-  id: string;            // 클라이언트 생성 UUID (DB 저장 전에도 표 렌더링에 필요)
-  date: string;          // ISO 8601 date (YYYY-MM-DD)
-  merchant: string;      // 가맹점명
-  amount: number;        // 원 단위 정수. 승인취소는 음수
-  rawRow: string[];      // 원본 CSV 행. 파싱 검증·디버깅용
+export type SourceKind = 'csv' | 'xlsx'
+export type Tier = 'free' | 'pro'
+
+// 파일에서 추출한 원시 표. 헤더와 문자열 행.
+export interface RawTable { headers: string[]; rows: string[][] }
+
+// 사용자가 확정한 컬럼 매핑. 값은 headers의 원소.
+export interface ColumnMapping { date: string | null; merchant: string | null; amount: string | null }
+
+// 서버로 전송되는 유일한 거래 표현. 업로드 시점이라 아직 id가 없다.
+export interface NormalizedRow {
+  occurredOn: string   // 'YYYY-MM-DD'
+  merchant: string
+  amountKrw: number    // 정수(원). 음수는 환불/취소
+}
+
+// 저장된 뒤의 거래. 분류 파이프라인은 전부 이 타입으로 흐른다.
+export interface IdentifiedRow extends NormalizedRow { id: string }
+
+// 마스킹을 통과한 거래. 브랜디드 타입이라 캐스팅 없이는 만들 수 없다.
+declare const redactedBrand: unique symbol
+export type RedactedRow = IdentifiedRow & { readonly [redactedBrand]: true }
+
+// 분류 결과. 'review'는 확신도가 낮아 사람 확인이 필요한 건.
+export type Classification = 'business' | 'personal' | 'review'
+
+// 사업경비의 계정과목. 이 목록을 늘리지 마라 — 프롬프트·UI·DB가 함께 묶여 있다.
+export type AccountCode =
+  | 'entertainment'    // 접대비
+  | 'travel'           // 여비교통비
+  | 'supplies'         // 소모품비
+  | 'communication'    // 통신비
+  | 'advertising'      // 광고선전비
+  | 'fees'             // 지급수수료
+  | 'welfare'          // 복리후생비
+  | 'vehicle'          // 차량유지비
+  | 'books'            // 도서인쇄비
+  | 'education'        // 교육훈련비
+  | 'rent'             // 임차료
+  | 'other'            // 기타
+```
+
+`amountKrw`에 소수를 허용하지 마라. 이유: 통화를 부동소수점으로 다루면 합계에 오차가 쌓인다.
+
+**세 타입을 구분하는 이유:**
+
+| 타입 | 시점 | 쓰는 곳 |
+|---|---|---|
+| `NormalizedRow` | 업로드 — DB에 아직 없다 | `summarize`, `computeFingerprint`, `POST /api/analyze` |
+| `IdentifiedRow` | 저장 후 — id가 있다 | `pickSample`, `applyRules`, 분류 파이프라인 전체 |
+| `RedactedRow` | 마스킹 후 | Anthropic으로 나가는 경로에서만 |
+
+`IdentifiedRow`가 없으면 `applyRules`가 배열을 `matched`/`unmatched`로 쪼개는 순간 원본 인덱스가 깨져 **분류 결과를 어느 거래 행에 써야 할지 알 수 없게 된다.**
+
+`RedactedRow`를 브랜디드 타입으로 두는 이유: `src/lib/redact.ts`만 이 타입을 만들 수 있으므로, 마스킹을 건너뛴 값이 Anthropic으로 나가는 경로가 **컴파일 단계에서 막힌다.** CRITICAL 규칙을 주석이 아니라 타입으로 강제한다.
+
+`AccountCode`는 `classification === 'business'`일 때만 의미가 있다. 개인지출·확인필요 건에는 `null`이다.
+
+### `src/types/analysis.ts`
+
+```ts
+export interface MerchantTotal { merchant: string; amountKrw: number }
+
+// step8이 반환하는 집계. LLM이 관여하지 않은, 코드가 계산한 값만 들어간다.
+export interface AnalysisSummary {
+  totalKrw: number
+  rowCount: number
+  periods: PeriodTotal[]        // 'YYYY-MM' 오름차순
+  topMerchants: MerchantTotal[]
+}
+
+export interface PeriodTotal { period: string; totalKrw: number }
+
+// 분류가 끝난 거래 1건.
+export interface ClassifiedTransaction {
+  id: string
+  occurredOn: string
+  merchant: string
+  amountKrw: number
+  classification: Classification | null   // null = 아직 분류 전
+  accountCode: AccountCode | null
+  confidence: number | null               // 0~1
+  isUserEdited: boolean
+  fromRule: boolean                       // 규칙이 결정했는가 (AI가 아니라)
+}
+
+// 분류 결과를 화면 단위로 묶은 것.
+export interface ClassifiedView {
+  review: ClassifiedTransaction[]         // confidence 낮은 건. 항상 상단에
+  business: ClassifiedTransaction[]
+  personal: ClassifiedTransaction[]
+  unclassified: ClassifiedTransaction[]   // 표본 모드에서 남은 건
+  businessTotalKrw: number
+  personalTotalKrw: number
 }
 ```
 
-`amount`를 정수 원 단위로 두는 이유: 부동소수점 누적 오차가 금액 합계에 나타나면 안 된다. 파싱 단계에서 콤마·통화기호를 제거하고 정수로 변환한다.
-
-### `src/types/classification.ts`
-
-```ts
-export type ClassificationLabel = "business" | "personal" | "uncertain";
-
-export interface Classification {
-  transactionId: string;
-  label: ClassificationLabel;
-  accountCode: string | null;   // 계정과목. label이 "business"일 때만 채운다
-  confidence: number;           // 0..1
-  reason: string;               // 한 문장. 사용자에게 노출된다
-  source: "ai" | "rule";        // 규칙 선적용으로 분류된 건은 "rule"
-}
-```
-
-`source`가 필요한 이유: 규칙으로 분류된 건은 AI를 거치지 않았으므로 확신도의 의미가 다르고, UI에서 구분 표시해야 한다.
-
-### `src/types/column-mapping.ts`
-
-카드사 CSV의 컬럼 위치를 우리 스키마로 잇는 매핑. 카드사 지문별로 저장·재사용된다 (ADR-003).
-
-```ts
-export interface ColumnMapping {
-  fingerprint: string;     // 헤더 행 기반 해시. 조회 키
-  issuerLabel: string;     // 사람이 읽는 라벨 (예: "신한카드 이용내역")
-  headerRowIndex: number;  // 헤더가 몇 번째 행인지 (0-based)
-  dateColumn: number;
-  merchantColumn: number;
-  amountColumn: number;
-  encoding: "utf-8" | "cp949";
-  dateFormat: string;      // 예: "YYYY.MM.DD", "YYYY-MM-DD"
-}
-```
-
-### `src/types/user-rule.ts`
-
-사용자가 분류를 수정했을 때 저장되는 규칙 (ADR-008).
-
-```ts
-export type RuleMatchType = "merchant_exact" | "merchant_contains";
-
-export interface UserRule {
-  id: string;
-  userId: string;
-  matchType: RuleMatchType;
-  pattern: string;
-  label: ClassificationLabel;
-  accountCode: string | null;
-  createdAt: string;
-}
-```
-
-정규식 매칭 타입은 만들지 마라. 이유: 사용자가 작성한 정규식은 ReDoS 위험이 있고, MVP에서 필요하지 않다.
+`confidence`가 `CONFIDENCE_THRESHOLD`(별도 상수, 0.7) 미만이면 `classification`을 `'review'`로 둔다. 임계값을 여러 파일에 복제하지 마라 — `src/types/tier.ts`에 함께 상수로 둔다.
 
 ### `src/types/tier.ts`
 
+요금제 숫자의 **단일 출처**다. PRD의 요금제 표와 일치시킨다.
+
 ```ts
-export type Tier = "anonymous" | "free" | "paid";
+export const CONFIDENCE_THRESHOLD = 0.7
+export const MAX_ROWS = 10_000
+export const SAMPLE_SIZE = 20
 
-export interface QuotaLimits {
-  analysesPerMonth: number;
-  chatMessagesPerMonth: number;
-  maxTransactionsPerUpload: number;
+export const QUOTA: Record<Tier, { classifyPerMonth: number; chatPerMonth: number }> = {
+  free: { classifyPerMonth: 1,  chatPerMonth: 0   },
+  pro:  { classifyPerMonth: 10, chatPerMonth: 100 },
 }
-
-export const TIER_LIMITS: Record<Tier, QuotaLimits>;
 ```
 
-`TIER_LIMITS` 실제 값 (ADR-009, ADR-012):
-- `anonymous`: 분석 1회(월 아닌 총 1회로 취급), 채팅 0, 업로드 100건
-- `free`: 분석 1, 채팅 0, 업로드 2000건
-- `paid`: 분석 10, 채팅 100, 업로드 2000건
+이 숫자를 다른 파일에 하드코딩하지 마라. 이유: 랜딩의 요금제 표(step13)와 서버 쿼터 검사(step9)가 어긋나면 사용자가 결제하고도 막힌다.
+
+### `src/types/api.ts`
+
+`docs/ARCHITECTURE.md`의 API 계약 표를 그대로 타입으로 옮긴다.
+
+```ts
+export interface AnalyzeRequest {
+  rows: NormalizedRow[]
+  cardLabel?: string
+  sourceKind: SourceKind
+}
+
+export type AnalyzeResponse =
+  | { ok: true; analysisId: string; summary: AnalysisSummary }
+  | { ok: false; reason: 'duplicate'; existingId: string }
+
+export type ClassifyMode = 'sample' | 'full'
+export interface ClassifyRequest { mode: ClassifyMode }
+
+export type ClassifyResponse =
+  | { ok: true; classified: number; fromRules: number; fromAi: number; quotaLeft: number }
+  | { ok: false; reason: 'quota_exceeded' | 'sample_used' | 'anonymous_full_denied' }
+
+export interface TransactionEdit {
+  id: string
+  classification: Classification
+  accountCode: AccountCode | null
+}
+export interface CorrectionsRequest { edits: TransactionEdit[]; saveAsRule: boolean }
+export interface CorrectionsResponse { ok: true; ruleIds: string[] }
+
+export interface ChatRequest { question: string }
+export type ChatResponse =
+  | { ok: true; answer: string; quotaLeft: number }
+  | { ok: false; reason: 'quota_exceeded' | 'tier_required' }
+
+export interface BillingSyncResponse { tier: Tier; currentPeriodEnd: string | null }
+export interface CheckoutRequest { plan: 'pro' }
+export interface CheckoutResponse { url: string }
+export interface OkResponse { ok: true }
+```
+
+모든 응답 유니온에 `ok` 같은 **판별자**를 반드시 둔다. 이유: 판별자 없는 유니온은 소비하는 쪽에서 타입 좁히기가 지저분해지고 세션마다 다르게 처리한다.
+
+게이팅 실패 응답(`ok: false`)에 분류 결과나 답변 본문 필드를 넣지 마라. 이유: 타입에 존재하면 언젠가 서버가 채워 보낸다.
+
+### `src/types/db.ts`
+
+`profiles` `analyses` `transactions` `user_rules` `usage_counters` 5개 테이블의 행 타입. `docs/ARCHITECTURE.md`의 데이터 모델과 컬럼명·타입을 일치시킨다. `amount_krw`는 `number`(정수), 날짜는 ISO 문자열.
 
 ### `src/types/index.ts`
 
@@ -111,27 +190,33 @@ export const TIER_LIMITS: Record<Tier, QuotaLimits>;
 ## Acceptance Criteria
 
 ```bash
-npm run build   # 컴파일 에러 없음
-npm test        # 기존 테스트 통과
-npm run lint    # 에러 없음
+npm run lint
+npm run build
+npm run test
+npx tsc --noEmit
 ```
 
 ## 검증 절차
 
 1. 위 AC 커맨드를 실행한다.
-2. 아키텍처 체크리스트를 확인한다:
-   - 타입이 `src/types/`에 있는가? (ARCHITECTURE.md 디렉터리 구조)
-   - ADR 기술 스택을 벗어나지 않았는가?
-   - CLAUDE.md CRITICAL 규칙을 위반하지 않았는가?
+2. 아키텍처 체크리스트:
+   - `docs/ARCHITECTURE.md`의 API 계약 표 9개 엔드포인트가 전부 타입으로 존재하는가?
+   - `AnalyzeResponse`·`ClassifyResponse`·`ChatResponse`에 `ok` 판별자가 있는가?
+   - `NormalizedRow`·`IdentifiedRow`·`RedactedRow` 세 타입이 전부 있는가?
+   - `RedactedRow`가 브랜디드 타입이라 임의로 만들 수 없는가?
+   - 게이팅 실패 응답에 본문 필드가 없는가?
+   - 요금제 숫자가 `src/types/tier.ts` 한 곳에만 있는가?
+   - 런타임 코드(함수 구현)를 넣지 않았는가?
 3. 결과에 따라 `phases/0-mvp/index.json`의 step 1을 업데이트한다:
-   - 성공 → `"status": "completed"`, `"summary": "산출물 한 줄 요약"`
-   - 수정 3회 시도 후에도 실패 → `"status": "error"`, `"error_message": "구체적 에러 내용"`
-   - 사용자 개입 필요 → `"status": "blocked"`, `"blocked_reason": "구체적 사유"` 후 즉시 중단
+   - 성공 → `"status": "completed"`, `"summary"`에 생성한 파일 경로와 핵심 타입 이름을 한 줄로
+   - 실패 → `"status": "error"` + `"error_message"`
+   - 사용자 개입 필요 → `"status": "blocked"` + `"blocked_reason"` 후 중단
 
 ## 금지사항
 
-- 함수나 클래스를 구현하지 마라. 이 step은 타입 정의만 다룬다. 이유: 구현이 섞이면 이후 step의 scope가 흐려진다.
-- `any`를 쓰지 마라. 불가피하면 `unknown`을 쓰고 좁혀라.
-- 금액을 `number`가 아닌 `string`이나 부동소수점 실수로 표현하지 마라. 이유: 합계 계산에서 오차가 발생한다.
-- 정규식 기반 규칙 매칭 타입을 추가하지 마라. 이유: 사용자 입력 정규식은 ReDoS 위험이 있다.
-- 기존 테스트를 깨뜨리지 마라
+- 런타임 로직을 넣지 마라. 이유: `src/types/`는 타입 전용이며, 로직을 넣으면 TDD 가드를 우회하는 통로가 된다. (`tier.ts`의 상수는 예외 — 값이지 로직이 아니다)
+- 게이팅 실패 응답에 분류 결과·답변 필드를 넣지 마라. 이유: 타입에 존재하면 언젠가 서버가 채워 보낸다.
+- `AccountCode` 목록을 늘리거나 줄이지 마라. 이유: 프롬프트(step10)·UI(step15)·DB 제약(step6)이 이 목록에 묶인다.
+- `any`를 쓰지 마라. 이유: 이 파일들이 step 간 계약이라 `any` 하나가 이후 전 세션의 타입 검사를 무력화한다.
+- API 계약을 임의로 바꾸지 마라. 이유: `docs/ARCHITECTURE.md`가 기준이며, 다르면 이후 step들이 맞지 않는 구현을 한다.
+- 기존 테스트를 깨뜨리지 마라.
