@@ -4,7 +4,7 @@
 
 - `/CLAUDE.md` — 보안 규칙 (마스킹 강제)
 - `/docs/ADR.md` — ADR-009(민감정보 제거 후 국외 전송)
-- `/src/types/domain.ts` (step1 — `NormalizedRow`)
+- `/src/types/domain.ts` (step1 — `IdentifiedRow`, `RedactedRow`. 브랜디드 타입 정의를 반드시 확인하라)
 - `/src/lib/mapping/index.ts` (step3 — 어떤 값이 여기까지 오는지 확인하라)
 
 ## 작업
@@ -26,8 +26,12 @@ export interface RedactionResult<T> {
 }
 
 export function redactMerchant(raw: string): string
-export function redactRows(rows: NormalizedRow[]): RedactionResult<NormalizedRow[]>
+export function redactRows(rows: IdentifiedRow[]): RedactionResult<RedactedRow[]>
 ```
+
+**이 파일이 `RedactedRow`를 만드는 유일한 곳이다.** step1이 브랜디드 타입으로 정의했으므로, 여기서 한 번만 캐스팅하고 그 캐스팅을 다른 파일에 복제하지 마라. 이유: `services/anthropic`이 `RedactedRow[]`만 받으므로, 이 관문을 건너뛴 값이 외부로 나가는 경로가 컴파일 단계에서 막힌다. 캐스팅이 여러 곳에 생기면 그 보장이 사라진다.
+
+`id`는 마스킹 대상이 아니다. 그대로 보존한다 — 호출부가 이 `id`로 분류 결과를 되짚는다.
 
 ### 제거 대상
 
@@ -63,7 +67,7 @@ export function redactRows(rows: NormalizedRow[]): RedactionResult<NormalizedRow
 - `국민 123-45-678901 이체` → `[ACCT]` 치환
 - 한 행에 두 패턴 → `removedCount === 2`
 - 입력 배열이 변형되지 않았는지 (원본 객체 참조 비교)
-- `amountKrw`·`occurredOn`이 그대로인지
+- `amountKrw`·`occurredOn`·`id`가 그대로인지
 
 ## Acceptance Criteria
 
@@ -81,7 +85,8 @@ npx vitest run src/lib/redact
    - 정상 상호(`이마트24`, `GS25`)가 보존되는 테스트가 있는가?
    - 입력 불변성 테스트가 있는가?
    - I/O·네트워크 호출이 없는 순수 함수인가?
-   - `amountKrw`·`occurredOn`을 수정하지 않는가?
+   - `amountKrw`·`occurredOn`·`id`를 수정하지 않는가?
+   - `grep -rn "as RedactedRow\|as unknown as" src/` 가 `src/lib/redact.ts` 밖에서 나오지 않는가?
 3. 결과에 따라 `phases/0-mvp/index.json`의 step 5를 업데이트한다:
    - 성공 → `"status": "completed"`, `"summary"`에 공개 함수와 마스킹 토큰 목록을 한 줄로
    - 실패 → `"status": "error"` + `"error_message"`
@@ -93,5 +98,7 @@ npx vitest run src/lib/redact
 - `amountKrw`·`occurredOn`을 마스킹하지 마라. 이유: 분류에 필수이며 민감정보가 아니다.
 - 입력 객체를 변형하지 마라. 이유: 호출부가 원본을 화면에 그대로 쓰고 있어, 변형하면 사용자 화면의 가맹점명이 `[NAME]`으로 바뀐다.
 - 숫자열을 넓게 잡아 마스킹하지 마라. 이유: `이마트24`·`GS25` 같은 정상 상호가 깨져 분류가 나빠진다.
+- `RedactedRow` 캐스팅을 이 파일 밖에 두지 마라. 이유: 다른 곳에서 캐스팅할 수 있으면 타입이 주는 보장이 사라지고, 마스킹을 건너뛴 값이 외부로 나간다.
+- `id`를 마스킹하거나 떨어뜨리지 마라. 이유: 호출부가 이 `id`로 분류 결과를 저장한다.
 - Anthropic을 호출하지 마라. 이유: 이 모듈은 순수 함수 관문이고, 호출은 step10의 범위다.
 - 기존 테스트를 깨뜨리지 마라.

@@ -6,6 +6,7 @@
 - `/docs/ARCHITECTURE.md` — 디렉토리 구조와 분석 파이프라인 1단계
 - `/docs/ADR.md` — ADR-006(브라우저 전처리), ADR-008(ExcelJS)
 - `/src/types/domain.ts` (step1 산출물 — `RawTable`, `SourceKind`)
+- `/src/types/tier.ts` (step1 — `MAX_ROWS`)
 - `/vitest.config.ts` (step0 산출물)
 
 ## 작업
@@ -16,7 +17,7 @@
 
 ```ts
 export interface IngestResult { table: RawTable; skippedPreambleRows: number; droppedTotalRows: number }
-export interface IngestOptions { maxRows?: number }   // 기본 10000
+export interface IngestOptions { maxRows?: number }   // 기본값은 tier.ts의 MAX_ROWS
 
 export async function ingestFile(
   buffer: ArrayBuffer, fileName: string, options?: IngestOptions
@@ -68,7 +69,7 @@ export function dropTotalRows(rows: string[][], headerIdx: number): { rows: stri
 
 ### 5. 상한
 
-행 수가 `maxRows`(기본 10,000)를 넘으면 명확한 메시지와 함께 throw한다. 조용히 잘라내지 마라. 이유: 사용자가 일부만 분석된 줄 모르고 잘못된 결론을 얻는다.
+행 수가 `maxRows`를 넘으면 명확한 메시지와 함께 throw한다. 기본값은 `src/types/tier.ts`의 `MAX_ROWS`를 import해서 쓴다 — **숫자를 하드코딩하지 마라.** 이유: 서버(step8)도 같은 상한을 검사하며, 두 값이 어긋나면 브라우저를 통과한 파일이 서버에서 거부된다. 조용히 잘라내지 마라. 이유: 사용자가 일부만 분석된 줄 모르고 잘못된 결론을 얻는다.
 
 ### 테스트 픽스처
 
@@ -100,6 +101,7 @@ npx vitest run src/lib/ingest
    - EUC-KR 픽스처에서 한글이 깨지지 않는가?
    - ExcelJS가 **동적 import**인가? (`grep -n "import('exceljs')" src/lib/ingest/xlsx.ts`)
    - `fs`·`Buffer` 등 Node 전용 API를 쓰지 않았는가?
+   - `grep -n "10000\|10_000" src/lib/ingest/` 가 비어 있는가? (`MAX_ROWS`를 import해야 한다)
 3. 결과에 따라 `phases/0-mvp/index.json`의 step 2를 업데이트한다:
    - 성공 → `"status": "completed"`, `"summary"`에 공개 함수 시그니처와 픽스처 종류를 한 줄로
    - 실패 → `"status": "error"` + `"error_message"`

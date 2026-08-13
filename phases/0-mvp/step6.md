@@ -44,27 +44,66 @@
 
 이게 없으면 쿼터 판정이 null로 무너진다. 익명 사용자도 `auth.users`에 들어가므로 이 트리거를 타야 한다.
 
-#### `effective_tier` 함수
+#### 함수 3개
+
+세 함수 모두 `security definer`, `search_path` 고정.
 
 ```sql
 create or replace function public.effective_tier(uid uuid) returns text
 -- tier='pro' AND current_period_end > now() 이면 'pro', 아니면 'free'
--- security definer, search_path 고정
+
+create or replace function public.increment_usage(kind text) returns int
+-- auth.uid()와 서버 시각 기준 'YYYY-MM'으로 usage_counters upsert,
+-- kind에 해당하는 컬럼을 원자적으로 +1 하고 갱신된 값을 반환한다.
+-- uid와 period를 인자로 받지 마라 — 호출자가 남의 것을 조작할 수 있다.
+
+create or replace function public.mark_sample_used() returns void
+-- auth.uid()의 profiles.sample_used 를 true 로 설정한다. 되돌리는 함수는 만들지 마라.
 ```
 
-**이 판정은 여기 한 곳에만 존재한다.** 애플리케이션 코드에서 다시 구현하지 마라.
+**`effective_tier` 판정은 여기 한 곳에만 존재한다.** 애플리케이션 코드에서 다시 구현하지 마라.
+
+`increment_usage`가 `uid`를 인자로 받지 않는 이유: 인자로 받으면 클라이언트가 남의 uid를 넣어 카운터를 소진시킬 수 있다. 함수 안에서 `auth.uid()`를 읽는다.
 
 #### RLS
 
 5개 테이블 전부 `enable row level security`.
 
-각 테이블에 SELECT·INSERT·UPDATE·DELETE 정책을 건다:
-- `using (owner_id = auth.uid())` — 읽기·수정·삭제
-- **`with check (owner_id = auth.uid())`** — INSERT·UPDATE
+**테이블마다 사용자에게 주는 권한이 다르다. 일괄로 걸지 마라.**
 
-`profiles`는 `id = auth.uid()`가 기준이다. `profiles`의 **UPDATE 정책에서 `tier`·`current_period_end` 컬럼을 사용자가 바꿀 수 없게** 한다. 이유: 사용자가 자기 행을 UPDATE해 `tier='pro'`로 만들 수 있으면 결제가 무의미해진다. 컬럼 단위 권한(`revoke update (tier, current_period_end) on profiles from authenticated`)으로 막는다.
+| 테이블 | SELECT | INSERT | UPDATE | DELETE |
+|---|---|---|---|---|
+| `analyses` | O | O | O | O |
+| `transactions` | O | O | O | O |
+| `user_rules` | O | O | O | O |
+| `profiles` | O | X (트리거가 만든다) | 제한적 — 아래 참조 | X |
+| `usage_counters` | O | **X** | **X** | **X** |
+
+허용하는 곳에는 `using (owner_id = auth.uid())`와 **`with check (owner_id = auth.uid())`** 를 둘 다 건다. `profiles`는 `id = auth.uid()`가 기준이다.
 
 > SELECT 정책만 걸고 끝내지 마라. `with check`가 없으면 남의 `owner_id`로 INSERT가 통과한다.
+
+##### `usage_counters` — 사용자는 쓸 수 없다
+
+SELECT만 허용하고 INSERT·UPDATE·DELETE 정책을 **만들지 않는다.** 쓰기는 `increment_usage` 함수(security definer)만 한다.
+
+> 이게 없으면 사용자가 `update usage_counters set classify_used = 0`을 직접 실행해 **쿼터 관문 전체를 무력화한다.** 무료 사용자가 AI 분류를 무제한으로 쓰게 되며, 비용이 그대로 나간다. 이 프로젝트에서 가장 직접적인 비용 유출 경로다.
+
+DELETE도 막는 이유: 행을 지우면 카운터가 0부터 다시 시작한다. UPDATE를 막고 DELETE를 열어두면 같은 구멍이다.
+
+##### `profiles` — 사용자가 바꿀 수 없는 컬럼
+
+```sql
+revoke update (tier, current_period_end, sample_used,
+               polar_customer_id, polar_subscription_id)
+  on public.profiles from authenticated;
+```
+
+- `tier`·`current_period_end` — 사용자가 자기 행을 UPDATE해 Pro가 되면 결제가 무의미하다
+- `sample_used` — `false`로 되돌리면 익명 표본 분류를 무한히 쓴다
+- `polar_*` — 남의 구독 ID를 자기 행에 넣는 통로가 된다
+
+이 컬럼들의 갱신 주체는 웹훅·`billing/sync`(service role)와 `mark_sample_used` 함수뿐이다. service role은 `authenticated` 롤이 아니므로 이 revoke의 영향을 받지 않는다.
 
 ### 2. `src/lib/supabase/browser.ts`
 
@@ -109,8 +148,10 @@ npx vitest run src/lib/supabase
    - `grep -n "enable row level security" supabase/migrations/0001_initial.sql` 이 5줄인가?
    - `grep -n "amount_krw" supabase/migrations/0001_initial.sql` 의 타입이 `bigint`인가?
    - `grep -n "numeric\|float\|real" supabase/migrations/0001_initial.sql` — `confidence` 외에 없는가?
-   - `effective_tier` 함수가 정의되어 있는가?
-   - `profiles`의 `tier` 컬럼에 사용자 UPDATE가 막혀 있는가?
+   - `effective_tier`·`increment_usage`·`mark_sample_used` 세 함수가 전부 있는가?
+   - `increment_usage`가 `uid`를 인자로 받지 **않는가**? (함수 안에서 `auth.uid()`를 읽어야 한다)
+   - `usage_counters`에 INSERT·UPDATE·DELETE 정책이 **없는가**?
+   - `revoke update` 목록에 `tier`·`current_period_end`·`sample_used`·`polar_*`가 전부 있는가?
    - `admin.ts`에 사용처 제한 주석이 있는가?
 3. 결과에 따라 `phases/0-mvp/index.json`의 step 6을 업데이트한다:
    - 성공 → `"status": "completed"`, `"summary"`에 마이그레이션 파일 경로, 테이블 5개 이름, 래퍼 3개 경로를 한 줄로
@@ -123,7 +164,10 @@ npx vitest run src/lib/supabase
 - `DROP TABLE`을 쓰지 마라. 이유: 훅이 차단하고, 데이터 손실 경로를 남기지 않는다.
 - SELECT 정책만 만들고 끝내지 마라. 이유: `with check`가 없으면 남의 `owner_id`로 INSERT가 통과한다.
 - `amount_krw`에 `numeric`·`real`·`double precision`을 쓰지 마라. 이유: 통화 합계에 오차가 생긴다.
-- 사용자가 `profiles.tier`를 UPDATE할 수 있게 두지 마라. 이유: 결제 없이 Pro가 된다.
+- 사용자가 `profiles.tier`·`sample_used`를 UPDATE할 수 있게 두지 마라. 이유: 결제 없이 Pro가 되고, 익명 표본 분류를 무한히 쓴다.
+- `usage_counters`에 사용자 INSERT·UPDATE·DELETE 정책을 만들지 마라. 이유: 사용자가 카운터를 0으로 되돌려 쿼터 관문 전체를 무력화한다. 쓰기는 `increment_usage` 함수만 한다.
+- `increment_usage`가 `uid`나 `period`를 인자로 받게 하지 마라. 이유: 남의 카운터를 소진시키는 통로가 된다.
+- RLS 정책을 5개 테이블에 일괄로 걸지 마라. 이유: `usage_counters`와 `profiles`는 사용자 쓰기 권한이 다르다.
 - `admin.ts`를 웹훅 외의 곳에서 쓰지 마라. 이유: RLS가 무력화되어 모든 사용자 데이터가 노출된다.
 - 애플리케이션 코드에 티어 판정을 다시 구현하지 마라. 이유: `effective_tier` 함수와 어긋나는 순간 게이팅이 깨진다.
 - 카드번호 컬럼을 만들지 마라. 이유: 저장하지 않기로 한 데이터다. 컬럼이 있으면 언젠가 채워진다.

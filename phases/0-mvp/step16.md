@@ -7,6 +7,7 @@
 - `/docs/ADR.md` — ADR-010(세무조언 금지), ADR-013(쿼터·캐싱)
 - `/docs/PRD.md` — 핵심 기능 5번, 요금제
 - `/src/types/api.ts`, `/src/types/tier.ts` (step1 — `ChatRequest/Response`, `QUOTA`)
+- `/src/types/domain.ts` (step1 — `IdentifiedRow`)
 - `/src/lib/quota.ts` (step9 — `checkQuota`, `consumeQuota`)
 - `/src/services/anthropic/chat.ts`, `/src/services/anthropic/prompt.ts` (step10 — `askAboutLedger`, `buildPromptBlocks`)
 - `/src/app/api/analyses/[id]/classify/route.ts` (step11 — 관문 순서와 응답 관례를 그대로 맞춰라)
@@ -26,7 +27,7 @@
    ├ reason 'tier_required'   → { ok:false, reason:'tier_required' }   (free 티어)
    └ reason 'quota_exceeded'  → { ok:false, reason:'quota_exceeded' }  (Pro 소진)
 4. 질문 검증                          — 빈 문자열 거부, 길이 상한
-5. 거래 조회 → askAboutLedger(rows, question)
+5. 거래 조회 → IdentifiedRow[] 로 매핑 → askAboutLedger(rows, question)
 6. 성공 시에만 consumeQuota(uid, 'chat')
 7. { ok:true, answer, quotaLeft }
 ```

@@ -20,8 +20,10 @@
 export function summarize(rows: NormalizedRow[]): AnalysisSummary
 export function computeFingerprint(rows: NormalizedRow[]): string
 export function bucketByClassification(txs: ClassifiedTransaction[]): ClassifiedView
-export function pickSample(txs: ClassifiedTransaction[], size: number): ClassifiedTransaction[]
+export function pickSample(rows: IdentifiedRow[], size: number): IdentifiedRow[]
 ```
+
+**입력 타입이 함수마다 다른 것은 의도된 것이다.** `summarize`·`computeFingerprint`는 업로드 시점(id 없음)에 돌고, `pickSample`은 저장 후 분류 파이프라인(id 있음)에서 돈다. `bucketByClassification`은 분류가 끝난 화면용이다. 편의를 위해 하나로 합치지 마라 — id 없는 값이 분류 경로로 흘러들면 결과를 어느 행에 쓸지 알 수 없게 된다.
 
 ### 1. 집계 (`summarize.ts`)
 
@@ -62,7 +64,9 @@ fingerprint = sha256(정렬된 전체 행을 개행으로 이은 문자열)
 
 이유: 20건으로 "AI가 제대로 가르는가"를 판단시켜야 하는데, 무작위로 고르면 편의점 결제만 나올 수 있다. 금액이 큰 건이 판단 가치가 높다.
 
-동점이면 `occurredOn` 내림차순으로 안정 정렬한다. 이유: 같은 입력에 같은 표본이 나와야 테스트가 고정된다.
+동점이면 `occurredOn`, 그다음 `id` 내림차순으로 안정 정렬한다. 이유: 같은 입력에 같은 표본이 나와야 테스트가 고정되고, 재실행 시 다른 건이 뽑히지 않는다.
+
+반환값은 입력 객체를 그대로 담는다(`id` 포함). 새 객체로 복사하며 `id`를 떨어뜨리지 마라 — 호출부(step11)가 이 `id`로 분류 결과를 저장한다.
 
 ### 테스트
 
@@ -74,6 +78,7 @@ fingerprint = sha256(정렬된 전체 행을 개행으로 이은 문자열)
 - `isUserEdited: true`이고 `confidence: 0.5`인 건이 `review`로 가지 **않는가**
 - `review`·`unclassified` 금액이 `businessTotalKrw`에 포함되지 **않는가**
 - `pickSample`이 금액 상위순이며 같은 입력에 같은 출력인가
+- `pickSample` 결과의 각 원소에 `id`가 보존되는가
 
 ## Acceptance Criteria
 

@@ -61,9 +61,13 @@ export type LinkError = 'already_linked' | 'identity_taken' | 'unknown'
 // DELETE /api/account → OkResponse
 ```
 
-처리: `requireUser()` → 해당 사용자의 `analyses` 삭제(`transactions`는 `ON DELETE CASCADE`로 따라간다) → `user_rules`·`usage_counters` 삭제 → `profiles`의 `sample_used`를 포함한 앱 상태 초기화 → `signOut()`.
+처리: `requireUser()` → 해당 사용자의 `analyses` 삭제(`transactions`는 `ON DELETE CASCADE`로 따라간다) → `user_rules` 삭제 → `signOut()`.
 
-`profiles`의 `tier`·`polar_subscription_id`·`current_period_end`는 **건드리지 마라.** 이유: 구독은 Polar 쪽에 살아 있다. 여기서 지우면 결제한 사용자가 재로그인 시 free가 되고, 웹훅이 다시 올 때까지 복구되지 않는다.
+**`usage_counters`를 지우지 마라.** 이유: 카운터가 0부터 다시 시작하면 무료 사용자가 "내 데이터 전체 삭제 → 재업로드"만 반복해 월 1회 제한을 무한히 우회한다. step17이 티어 변경 시 초기화를 금지한 것과 같은 이유다. 사용량 기록은 금융 데이터가 아니므로 삭제 요구의 대상도 아니다.
+
+애초에 지울 수도 없다 — step6에서 `usage_counters`에 사용자 DELETE 정책을 만들지 않았다.
+
+**`profiles`는 건드리지 마라.** `tier`·`polar_*`·`current_period_end`는 구독이 Polar 쪽에 살아 있으므로 지우면 결제한 사용자가 재로그인 시 free가 된다. `sample_used`도 마찬가지로 되돌리지 마라 — 익명 표본 분류를 무한히 쓰는 통로가 된다. 이 컬럼들은 step6의 `revoke update` 대상이라 사용자 세션으로는 갱신 자체가 불가능하다.
 
 **`auth.users`를 삭제하지 마라.** 이유: admin API가 필요한데 service role 사용을 웹훅 한 곳으로 제한했다. 계정 자체 삭제는 다음 phase다.
 
@@ -87,8 +91,9 @@ Supabase 클라이언트를 모킹한다. 실제 OAuth를 수행하지 마라.
 - `linkIdentity` 실패 시 `signOut`이 **호출되지 않는지** (결과 보존)
 - `identity_taken` 매핑
 - 콜백이 외부 URL `next`를 거부하는지
-- `DELETE /api/account`가 미인증에서 401이고, 정상 시 `analyses` 삭제와 `signOut`을 호출하는지
-- `DELETE /api/account`가 `profiles.tier`를 변경하지 **않는지**
+- `DELETE /api/account`가 미인증에서 401이고, 정상 시 `analyses`·`user_rules` 삭제와 `signOut`을 호출하는지
+- `DELETE /api/account`가 `profiles`를 변경하지 **않는지**
+- `DELETE /api/account`가 `usage_counters`에 **접근하지 않는지**
 - `DELETE /api/analyses/:id`가 남의 분석에 404를 반환하는지
 
 ## Acceptance Criteria
@@ -106,6 +111,7 @@ npx vitest run src/lib/supabase/identity src/app/auth src/app/api/account
 2. 아키텍처 체크리스트:
    - `grep -rn "linkIdentity\|signInWithOAuth" src/` 결과가 `src/lib/supabase/identity.ts`에만 나오는가?
    - `grep -rn "admin\|service_role" src/app/api/account/` 가 비어 있는가?
+   - `grep -rn "usage_counters\|sample_used\|profiles" src/app/api/account/` 가 비어 있는가?
    - `grep -rniE "계정 삭제|계정을 삭제" src/` 가 비어 있는가?
    - 콜백이 `next`의 오리진을 검사하는가?
    - `auth.users` 삭제 호출이 없는가? (`grep -rn "admin.auth.deleteUser" src/`)
@@ -122,6 +128,8 @@ npx vitest run src/lib/supabase/identity src/app/auth src/app/api/account
 - `next`에 외부 URL을 허용하지 마라. 이유: 오픈 리다이렉트 취약점이 된다.
 - `auth.users`를 삭제하지 마라. 이유: admin API가 필요한데 service role 사용을 웹훅 한 곳으로 제한했다.
 - `DELETE /api/account`에서 `profiles.tier`·구독 필드를 지우지 마라. 이유: Polar에 구독이 살아 있는데 앱에서만 free가 되어 결제한 사용자가 막힌다.
+- `usage_counters`를 지우지 마라. 이유: 무료 사용자가 삭제→재업로드를 반복해 월 1회 제한을 무한히 우회한다.
+- `profiles.sample_used`를 `false`로 되돌리지 마라. 이유: 익명 표본 분류(회당 약 30원)를 무한히 쓰는 통로가 된다.
 - UI 문구나 주석에 "계정 삭제"라고 쓰지 마라. 이유: 계정은 남으며, 사용자가 사라졌다고 믿으면 신뢰 문제가 된다.
 - UI를 만들지 마라. 이유: step13·15의 범위다.
 - 실제 OAuth를 수행하는 테스트를 쓰지 마라. 이유: blocked가 되어 이후 step이 전부 멈춘다.

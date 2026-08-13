@@ -114,7 +114,22 @@ usage_counters (owner_id, period, classify_used, chat_used)
 5개 테이블 전부 `owner_id = auth.uid()`. 익명 사용자도 진짜 uid가 있으므로 예외 경로가 없다.
 **SELECT 정책만으로는 부족하다.** INSERT·UPDATE에 `WITH CHECK (owner_id = auth.uid())`를 반드시 건다. `owner_id`는 서버가 `auth.uid()`에서 채운다.
 
-**service role은 Polar 웹훅의 tier 갱신 한 곳에서만** 쓴다. `DELETE /api/account`는 앱 데이터 삭제 + 로그아웃만 수행하고 `auth.users`는 건드리지 않는다.
+**단, 테이블마다 사용자에게 주는 권한이 다르다.** 일괄로 걸면 안 된다.
+
+| 테이블 | 사용자 권한 | 쓰기 주체 |
+|---|---|---|
+| `analyses` · `transactions` · `user_rules` | SELECT·INSERT·UPDATE·DELETE | 사용자 세션 |
+| `profiles` | SELECT + 일부 컬럼 UPDATE | 트리거 / 웹훅(service role) / DB 함수 |
+| `usage_counters` | **SELECT만** | `increment_usage()` (security definer) |
+
+`usage_counters`에 사용자 쓰기를 열면 `update usage_counters set classify_used = 0`으로 **쿼터 관문 전체가 무력화된다.** 이 프로젝트에서 가장 직접적인 비용 유출 경로다. DELETE도 같은 이유로 막는다 — 행을 지우면 카운터가 0부터 다시 시작한다.
+
+`profiles`의 `tier` · `current_period_end` · `sample_used` · `polar_*`는 `revoke update ... from authenticated`로 막는다. 각각 결제 우회, 표본 무한 사용, 남의 구독 ID 탈취 경로가 된다.
+
+security definer 함수 3개: `effective_tier(uid)` · `increment_usage(kind)` · `mark_sample_used()`.
+`increment_usage`는 **`uid`·`period`를 인자로 받지 않는다** — 함수 안에서 `auth.uid()`와 서버 시각을 읽는다. 인자로 받으면 남의 카운터를 소진시킬 수 있다.
+
+**service role은 Polar 웹훅의 tier 갱신과 `billing/sync`에서만** 쓴다. `DELETE /api/account`는 `analyses`·`user_rules`만 지우고 `usage_counters`·`profiles`·`auth.users`는 건드리지 않는다.
 
 ## API 계약
 

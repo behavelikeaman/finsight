@@ -6,6 +6,7 @@
 - `/docs/ARCHITECTURE.md` — API 계약, 파이프라인 2단계, "분류 모드" 절
 - `/docs/ADR.md` — ADR-013(쿼터), ADR-014(3단계), ADR-015(표본), ADR-017(서버 판정)
 - `/src/types/api.ts`, `/src/types/tier.ts` (step1 — `ClassifyRequest/Response`, `SAMPLE_SIZE`)
+- `/src/types/domain.ts` (step1 — `IdentifiedRow`. 이 파이프라인이 `id`를 어떻게 옮기는지 확인하라)
 - `/src/lib/rules.ts`, `/src/lib/quota.ts` (step9 — 두 관문)
 - `/src/lib/analysis/index.ts` (step4 — `pickSample`)
 - `/src/services/anthropic/classify.ts` (step10 — `classifyTransactions`)
@@ -32,14 +33,22 @@ step9에서 만든 두 관문과 step10의 서비스를 **여기서 배선한다
    ├ sample: checkSampleAllowance(uid)  false면 { ok:false, reason:'sample_used' }
    └ full:   checkQuota(uid,'classify') allowed:false면 { ok:false, reason:'quota_exceeded' }
 5. 대상 거래 조회                            — classification IS NULL 인 건만
+   └ IdentifiedRow[] 로 매핑 (id 를 반드시 실어라)
    └ sample이면 pickSample(rows, SAMPLE_SIZE)
 6. 관문 B — applyRules(rows, userRules)
    └ matched 는 AI로 보내지 않고 바로 저장 (rule_id 기록)
-7. classifyTransactions(unmatched)         ← 여기서만 AI 호출
-8. 결과 저장                                — classification, account_code, confidence
-9. 성공 시에만 consumeQuota / markSampleUsed
+7. classifyTransactions({ rows: unmatched })  ← 여기서만 AI 호출
+8. 결과 저장                                — id 기준으로 UPDATE
+                                              classification, account_code, confidence
+9. 성공 시에만 consumeQuota / markSampleUsed  ← RPC 경유 (테이블 직접 쓰기 불가)
 10. { ok:true, classified, fromRules, fromAi, quotaLeft }
 ```
+
+### `id`로만 되짚는다
+
+`applyRules`가 배열을 `matched`/`unmatched`로 쪼개므로 **배열 index는 원본 거래를 가리키지 못한다.** `classifyTransactions`가 반환하는 `ClassifyOutputItem.id`와 `RuleMatch.row.id`로만 UPDATE 대상을 정한다.
+
+index로 되짚는 코드를 쓰지 마라. 조용히 엉뚱한 거래에 분류가 저장되고, 테스트에서 잘 드러나지 않는다.
 
 ### 반드시 지킬 순서
 
@@ -87,6 +96,8 @@ Supabase·Anthropic·`quota`·`rules`를 모킹한다. 실제 호출하지 마�
 - 성공 → `consumeQuota` 1회 호출
 - `is_user_edited=true`인 건이 대상에서 빠지는지
 - `mode:'sample'`일 때 AI에 넘어간 건이 `SAMPLE_SIZE` 이하인지
+- **규칙이 일부만 매칭된 상태에서** AI 결과가 올바른 거래 id에 저장되는지 (index 되짚기라면 여기서 어긋난다)
+- `consumeQuota`/`markSampleUsed`가 테이블 직접 쓰기가 아니라 RPC를 타는지
 
 ## Acceptance Criteria
 
@@ -107,6 +118,7 @@ npx vitest run src/app/api/analyses
    - `grep -n "body.mode\|request.*mode" ` — `mode`를 재판정 없이 그대로 쓰는 곳이 없는가?
    - service role 클라이언트를 쓰지 않는가? (`grep -rn "admin" src/app/api/analyses/`)
    - 게이팅 실패 응답에 분류 결과가 없는가?
+   - 분류 결과를 배열 index가 아니라 `id`로 저장하는가?
 3. 결과에 따라 `phases/0-mvp/index.json`의 step 11을 업데이트한다:
    - 성공 → `"status": "completed"`, `"summary"`에 엔드포인트·관문 순서·모드 재판정 방식을 한 줄로
    - 실패 → `"status": "error"` + `"error_message"`
@@ -121,6 +133,8 @@ npx vitest run src/app/api/analyses
 - 이미 분류된 건이나 `is_user_edited=true`인 건을 재분류하지 마라. 이유: 사용자가 고친 값이 덮이고 비용이 중복 발생한다.
 - 남의 분석에 403을 반환하지 마라. 이유: 403은 "존재하지만 권한 없음"을 알려준다. 404를 쓴다.
 - service role 클라이언트를 쓰지 마라. 이유: 이 경로는 사용자 세션으로 RLS 아래서 동작해야 한다.
+- 배열 index로 분류 결과를 되짚지 마라. 이유: `applyRules`가 배열을 쪼갠 뒤라 index가 원본 거래를 가리키지 못한다. 엉뚱한 거래에 분류가 저장되고 테스트에서 드러나지 않는다.
+- `usage_counters`·`profiles.sample_used`를 직접 UPDATE하려 하지 마라. 이유: step6이 RLS·컬럼 권한으로 막았다. 막혔다고 정책을 푸는 마이그레이션을 추가하지 말고 RPC를 호출하라.
 - 게이팅 실패 응답에 분류 결과를 담지 마라. 이유: 서버가 값을 보내지 않는 것이 유일한 게이팅 수단이다.
 - 세무 판단 문구를 응답에 넣지 마라. 이유: 제품 경계다.
 - 기존 테스트를 깨뜨리지 마라.

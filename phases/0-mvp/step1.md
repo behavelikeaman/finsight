@@ -27,12 +27,19 @@ export interface RawTable { headers: string[]; rows: string[][] }
 // 사용자가 확정한 컬럼 매핑. 값은 headers의 원소.
 export interface ColumnMapping { date: string | null; merchant: string | null; amount: string | null }
 
-// 서버로 전송되는 유일한 거래 표현.
+// 서버로 전송되는 유일한 거래 표현. 업로드 시점이라 아직 id가 없다.
 export interface NormalizedRow {
   occurredOn: string   // 'YYYY-MM-DD'
   merchant: string
   amountKrw: number    // 정수(원). 음수는 환불/취소
 }
+
+// 저장된 뒤의 거래. 분류 파이프라인은 전부 이 타입으로 흐른다.
+export interface IdentifiedRow extends NormalizedRow { id: string }
+
+// 마스킹을 통과한 거래. 브랜디드 타입이라 캐스팅 없이는 만들 수 없다.
+declare const redactedBrand: unique symbol
+export type RedactedRow = IdentifiedRow & { readonly [redactedBrand]: true }
 
 // 분류 결과. 'review'는 확신도가 낮아 사람 확인이 필요한 건.
 export type Classification = 'business' | 'personal' | 'review'
@@ -54,6 +61,18 @@ export type AccountCode =
 ```
 
 `amountKrw`에 소수를 허용하지 마라. 이유: 통화를 부동소수점으로 다루면 합계에 오차가 쌓인다.
+
+**세 타입을 구분하는 이유:**
+
+| 타입 | 시점 | 쓰는 곳 |
+|---|---|---|
+| `NormalizedRow` | 업로드 — DB에 아직 없다 | `summarize`, `computeFingerprint`, `POST /api/analyze` |
+| `IdentifiedRow` | 저장 후 — id가 있다 | `pickSample`, `applyRules`, 분류 파이프라인 전체 |
+| `RedactedRow` | 마스킹 후 | Anthropic으로 나가는 경로에서만 |
+
+`IdentifiedRow`가 없으면 `applyRules`가 배열을 `matched`/`unmatched`로 쪼개는 순간 원본 인덱스가 깨져 **분류 결과를 어느 거래 행에 써야 할지 알 수 없게 된다.**
+
+`RedactedRow`를 브랜디드 타입으로 두는 이유: `src/lib/redact.ts`만 이 타입을 만들 수 있으므로, 마스킹을 건너뛴 값이 Anthropic으로 나가는 경로가 **컴파일 단계에서 막힌다.** CRITICAL 규칙을 주석이 아니라 타입으로 강제한다.
 
 `AccountCode`는 `classification === 'business'`일 때만 의미가 있다. 개인지출·확인필요 건에는 `null`이다.
 
@@ -183,6 +202,8 @@ npx tsc --noEmit
 2. 아키텍처 체크리스트:
    - `docs/ARCHITECTURE.md`의 API 계약 표 9개 엔드포인트가 전부 타입으로 존재하는가?
    - `AnalyzeResponse`·`ClassifyResponse`·`ChatResponse`에 `ok` 판별자가 있는가?
+   - `NormalizedRow`·`IdentifiedRow`·`RedactedRow` 세 타입이 전부 있는가?
+   - `RedactedRow`가 브랜디드 타입이라 임의로 만들 수 없는가?
    - 게이팅 실패 응답에 본문 필드가 없는가?
    - 요금제 숫자가 `src/types/tier.ts` 한 곳에만 있는가?
    - 런타임 코드(함수 구현)를 넣지 않았는가?

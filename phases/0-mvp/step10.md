@@ -36,6 +36,8 @@ export interface PromptBlocks {
 export function buildPromptBlocks(rows: RedactedRow[]): PromptBlocks
 ```
 
+`RedactedRow`만 받는 것이 이 함수의 안전장치다(step1의 브랜디드 타입). `IdentifiedRow`를 넘기려 하면 컴파일이 실패한다 — **타입을 느슨하게 바꿔 통과시키지 마라.** 마스킹을 건너뛴 값이 국외로 나가는 것을 막는 유일한 구조적 장치다.
+
 블록 순서와 캐시 지점:
 
 ```
@@ -51,9 +53,9 @@ export function buildPromptBlocks(rows: RedactedRow[]): PromptBlocks
 ### 3. `classify.ts` — 거래 분류
 
 ```ts
-export interface ClassifyInput { rows: NormalizedRow[] }
+export interface ClassifyInput { rows: IdentifiedRow[] }
 export interface ClassifyOutputItem {
-  index: number
+  id: string                  // 입력 행의 id. 배열 index가 아니다
   classification: Classification
   accountCode: AccountCode | null
   confidence: number          // 0~1
@@ -62,7 +64,9 @@ export interface ClassifyOutputItem {
 export async function classifyTransactions(input: ClassifyInput): Promise<ClassifyOutputItem[]>
 ```
 
-**호출 전에 반드시 `redactRows()`를 통과시킨다.** 마스킹을 거치지 않은 값이 나가는 코드 경로를 만들지 마라. 이 함수 안에서 호출하되, 호출했다는 사실을 테스트로 고정하라.
+**결과를 배열 index로 반환하지 마라. `id`로 반환한다.** 이유: 호출부(step11)는 `applyRules`가 쪼갠 부분 배열을 넘기므로, index는 원본 거래를 가리키지 못한다. 모델에게는 번호를 매겨 보내되, 응답을 받은 뒤 그 번호를 **입력 배열의 `id`로 되돌려** 반환한다.
+
+**입력은 `IdentifiedRow[]`이고, 이 함수가 내부에서 `redactRows()`를 호출해 `RedactedRow[]`로 만든 뒤 `buildPromptBlocks`에 넘긴다.** 마스킹을 거치지 않은 값이 나가는 코드 경로를 만들지 마라 — `buildPromptBlocks`의 시그니처가 이를 컴파일 단계에서 강제하지만, 호출했다는 사실도 테스트로 고정하라.
 
 #### 출력 강제
 
@@ -98,8 +102,10 @@ tool use(structured output)로 스키마를 강제한다. 자유 텍스트를 �
 ### 4. `chat.ts` — Q&A (step16이 쓴다)
 
 ```ts
-export async function askAboutLedger(rows: NormalizedRow[], question: string): Promise<string>
+export async function askAboutLedger(rows: IdentifiedRow[], question: string): Promise<string>
 ```
+
+여기서도 `redactRows()`를 통과시킨 뒤 `buildPromptBlocks`를 부른다.
 
 `buildPromptBlocks`로 **step11과 동일한 프리픽스**를 만들고 질문만 덧붙인다. 프리픽스가 달라지면 캐시가 미스되어 비용이 10배가 된다.
 
@@ -113,6 +119,8 @@ Anthropic SDK를 모킹한다. **실제 API를 호출하지 마라** — 키가 
 - SDK에 전달된 블록에 `cache_control`이 붙어 있는지
 - 같은 입력에 같은 프리픽스 문자열이 나오는지 (결정론)
 - 응답 길이 불일치 → 에러
+- 반환된 `id`가 전부 입력 배열의 `id` 집합에 속하는지 (모델이 지어낸 번호가 섞이지 않는지)
+- 부분 배열을 넘겨도 올바른 `id`가 돌아오는지 (index 기반이 아님을 고정)
 - 알 수 없는 `accountCode` → `'other'`
 - `confidence: 0.5`인 `business` → `'review'`로 강등
 - `classification`이 `personal`인데 `accountCode`가 있으면 `null`로
@@ -149,6 +157,8 @@ npx vitest run src/services/anthropic
 - 합계·평균·증감률을 LLM에게 계산시키지 마라. 이유: 금액 계산은 코드가 한다(step4). 두 개의 숫자가 생긴다.
 - 자유 텍스트 응답을 파싱하지 마라. 이유: 형식이 흔들리면 전건이 깨진다. tool use로 스키마를 강제한다.
 - 모델 응답을 검증 없이 저장하지 마라. 이유: 존재하지 않는 계정과목이 DB에 들어간다.
+- 결과를 배열 index로 반환하지 마라. 이유: 호출부가 부분 배열을 넘기므로 index가 원본 거래를 가리키지 못하고, 엉뚱한 거래에 분류가 저장된다.
+- `buildPromptBlocks`의 입력 타입을 `IdentifiedRow[]`로 완화하지 마라. 이유: 마스킹 누락을 컴파일 단계에서 막는 유일한 장치가 사라진다.
 - 거래내역을 캐시 프리픽스 밖에 두지 마라. 이유: Q&A 질문마다 전체 내역이 재과금되어 유닛 이코노믹스가 무너진다.
 - 실제 Anthropic API를 호출하는 테스트를 쓰지 마라. 이유: 키가 없어 blocked가 되고 이후 step이 전부 멈춘다.
 - 쿼터를 검사하지 마라. 이유: 이 모듈은 래퍼이며, 관문은 호출부(step11·16)가 건다.

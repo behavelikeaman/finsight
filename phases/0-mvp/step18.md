@@ -26,8 +26,9 @@
 
 ```
 1. Supabase 프로젝트 생성
-2. supabase/migrations/*.sql 을 순서대로 적용
-   → 0001_initial.sql, 0002_usage.sql
+2. supabase/migrations/*.sql 을 파일명 순서대로 적용
+   → 적용 후 Table Editor에서 usage_counters 의 정책이 SELECT 하나뿐인지 확인
+     (INSERT/UPDATE 정책이 보이면 쿼터가 우회 가능한 상태다)
 3. Supabase 대시보드 토글 (셋 다 켜지 않으면 플로우가 통째로 죽는다)
    - Authentication > Sign In/Up > Anonymous Sign-Ins   활성화
      → 파일 드롭 시점 세션 생성에 필요

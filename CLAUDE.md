@@ -26,12 +26,13 @@
 
 ### 보안
 - CRITICAL: Anthropic·Polar 키는 `src/app/api/` 라우트 핸들러에서만 쓴다. 클라이언트 컴포넌트나 `NEXT_PUBLIC_*`로 절대 노출하지 마라
-- CRITICAL: 외부 API로 나가는 거래 데이터는 예외 없이 `src/lib/redact.ts`를 거친다. 마스킹을 거치지 않은 값을 외부로 보내는 코드는 금지
+- CRITICAL: 외부 API로 나가는 거래 데이터는 예외 없이 `src/lib/redact.ts`를 거친다. 마스킹을 거치지 않은 값을 외부로 보내는 코드는 금지. `RedactedRow`는 `redact.ts`만 만들 수 있는 브랜디드 타입이므로 캐스팅을 다른 파일로 복제하지 마라
 - CRITICAL: 사용자 데이터 테이블에는 예외 없이 RLS를 건다. SELECT뿐 아니라 **INSERT·UPDATE에 `WITH CHECK (owner_id = auth.uid())`** 를 반드시 건다
 - CRITICAL: `owner_id`는 클라이언트가 보낸 값이 아니라 **서버가 `auth.uid()`에서 채운다**
-- CRITICAL: service role 키는 **Polar 웹훅의 tier 갱신 한 곳에서만** 쓴다. 그 외 어디서도 쓰지 마라. RLS가 무력화된다
-- CRITICAL: 유료 기능 게이팅과 쿼터는 서버에서 판정한다. 클라이언트가 보낸 `tier`·잔여 횟수를 신뢰하지 마라
-- CRITICAL: 잠긴 데이터는 **서버가 값을 보내지 않는 방식**으로 가린다. CSS 블러로 가리지 마라 — 개발자도구로 걷힌다
+- CRITICAL: service role 키는 **Polar 구독 상태 갱신(웹훅·`billing/sync`)에서만** 쓴다. 그 외 어디서도 쓰지 마라. RLS가 무력화된다
+- CRITICAL: `usage_counters`와 `profiles`의 `tier`·`sample_used`·`polar_*`는 **사용자가 쓸 수 없다.** 갱신은 security definer 함수(`increment_usage`·`mark_sample_used`)나 service role로만 한다. 직접 UPDATE하려다 막히면 정책을 푸는 마이그레이션을 추가하지 말고 RPC를 호출하라 — 쓰기를 열면 쿼터 관문 전체가 무력화된다
+- CRITICAL: 유료 기능 게이팅과 쿼터는 서버에서 판정한다. 클라이언트가 보낸 `tier`·잔여 횟수·분류 모드를 신뢰하지 마라
+- CRITICAL: 막힌 기능은 **서버가 값을 보내지 않는 방식**으로 가린다. CSS 블러나 `display:none`으로 가리지 마라 — 개발자도구로 걷힌다
 - 환경변수는 모듈 로드 시점이 아니라 **호출 시점**에 읽는다(`src/lib/env.ts`). 로드 시점에 읽으면 키 없는 환경에서 빌드가 깨진다
 - 카드번호는 어떤 컬럼에도 저장하지 마라
 
@@ -55,6 +56,7 @@
 ### 코드 배치
 - 컴포넌트 `src/components/`, 타입 `src/types/`, 외부 API 래퍼 `src/services/`
 - `src/lib/{ingest,mapping,analysis}/`와 `rules.ts`·`redact.ts`는 I/O 없는 **순수 함수**로 작성한다. 브라우저·서버 양쪽에서 같은 코드가 돈다
+- 거래 타입은 세 단계다: `NormalizedRow`(업로드, id 없음) → `IdentifiedRow`(저장 후) → `RedactedRow`(외부 전송). 편의로 합치지 마라 — 분류 결과는 **배열 index가 아니라 `id`로만** 원본 거래에 되짚는다
 - 기본은 Server Component. 인터랙션이 필요한 곳만 `"use client"`
 - 색상은 Tailwind 테마 토큰으로만 쓴다. hex 값을 컴포넌트에 하드코딩하지 마라
 - 라이트모드 고정. 다크모드 분기를 만들지 마라

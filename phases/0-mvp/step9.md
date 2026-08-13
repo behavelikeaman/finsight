@@ -17,18 +17,18 @@ AI 호출 앞에 세울 **두 개의 관문**을 만든다. 이 step에서는 �
 
 ```ts
 export interface RuleMatch {
-  row: NormalizedRow
+  row: IdentifiedRow          // id를 반드시 보존한다
   classification: Classification
   accountCode: AccountCode | null
   ruleId: string
 }
 
 export interface RuleApplyResult {
-  matched: RuleMatch[]     // 규칙이 결정한 건. AI로 보내지 않는다
-  unmatched: NormalizedRow[]  // AI로 보낼 건
+  matched: RuleMatch[]        // 규칙이 결정한 건. AI로 보내지 않는다
+  unmatched: IdentifiedRow[]  // AI로 보낼 건
 }
 
-export function applyRules(rows: NormalizedRow[], rules: UserRuleRow[]): RuleApplyResult
+export function applyRules(rows: IdentifiedRow[], rules: UserRuleRow[]): RuleApplyResult
 
 /** 사용자가 고친 거래에서 규칙 패턴을 뽑는다. */
 export function derivePattern(merchant: string): string
@@ -41,6 +41,8 @@ export function derivePattern(merchant: string): string
 `derivePattern`은 가맹점명에서 지점·번호 꼬리를 떼어 재사용 가능한 패턴을 만든다(`스타벅스 강남점` → `스타벅스`). 다만 원본이 짧으면(4자 이하) 그대로 쓴다. 이유: 과하게 일반화한 패턴은 무관한 거래까지 잡는다.
 
 `applyRules`는 **I/O가 없다.** 규칙 조회는 호출부(step11)가 하고, 여기에는 배열로 넘긴다.
+
+`matched`와 `unmatched` 양쪽 모두 원본의 `id`를 그대로 담는다. 배열을 쪼개는 순간 인덱스가 깨지므로, **`id`가 유일한 되짚기 수단이다.** 새 객체로 복사하며 `id`를 떨어뜨리지 마라.
 
 > 이 관문이 원가 구조의 핵심이다. 규칙에 걸린 거래는 AI로 나가지 않으므로, 재방문 사용자일수록 호출 건수가 줄어든다.
 
@@ -70,17 +72,28 @@ export async function markSampleUsed(userId: string): Promise<void>
 
 **검사와 차감을 분리하는 이유**: AI 호출이 실패했을 때 쿼터를 먹으면 안 된다. `checkQuota` → 호출 → 성공 시에만 `consumeQuota`.
 
-`consumeQuota`는 `usage_counters`에 upsert하며 **원자적으로 증가**시켜야 한다. Postgres 함수(`increment_usage(uid, period, kind)`)를 `supabase/migrations/0002_usage.sql`에 추가하고 RPC로 부른다. 애플리케이션에서 읽고-더하고-쓰지 마라 — 동시 요청에서 카운트가 새어 나간다.
+### 쓰기는 전부 DB 함수로만 한다
 
-기간(`period`)은 서버 시각 기준 `YYYY-MM`이다. 클라이언트가 보낸 값을 쓰지 마라.
+step6에서 `usage_counters`에 사용자 INSERT·UPDATE·DELETE 정책을 만들지 않았고, `profiles.sample_used`도 `revoke update` 대상이다. 따라서 **여기서 테이블을 직접 쓰려고 하면 RLS에 막힌다.** 이건 버그가 아니라 설계다.
+
+- `consumeQuota` → `increment_usage(kind)` RPC 호출. 인자는 `kind`뿐이다(uid·period는 함수가 `auth.uid()`와 서버 시각에서 읽는다)
+- `markSampleUsed` → `mark_sample_used()` RPC 호출
+
+세 함수 모두 step6의 `0001_initial.sql`에 이미 있다. **새 마이그레이션 파일을 만들지 마라.**
+
+애플리케이션에서 읽고-더하고-쓰지 마라 — 동시 요청에서 카운트가 새어 나간다.
+
+기간(`period`)은 서버 시각 기준 `YYYY-MM`이며 DB 함수가 정한다. 클라이언트가 보낸 값은 물론이고 애플리케이션이 계산한 값도 넘기지 마라.
 
 ### 테스트
 
 - `applyRules`: 부분 문자열 매칭, 가장 긴 패턴 우선, 매칭된 건이 `unmatched`에 없는지, 빈 규칙 배열
 - `applyRules`: `merchant_pattern`에 `.*`나 `[a-z]+`가 들어와도 정규식으로 해석되지 않는지
 - `derivePattern`: 지점 꼬리 제거, 짧은 이름은 그대로
+- `applyRules`: `matched`·`unmatched` 양쪽에 원본 `id`가 보존되는지
 - `checkQuota`: free/pro 각각의 한도 경계, chat + free → `tier_required`
-- `consumeQuota`: RPC를 호출하는지 (읽고-쓰기 패턴이 아닌지)
+- `consumeQuota`: `increment_usage` RPC를 호출하는지 (테이블 직접 쓰기가 아닌지)
+- `markSampleUsed`: `mark_sample_used` RPC를 호출하는지
 - `checkSampleAllowance`: `sample_used`가 true면 false 반환
 
 Supabase는 모킹한다. 실제 DB에 접속하지 마라.
@@ -101,10 +114,12 @@ npx vitest run src/lib/rules src/lib/quota
    - `grep -rn "new RegExp\|RegExp(" src/lib/rules.ts` 가 비어 있는가?
    - `grep -rn "classifyPerMonth: [0-9]\|chatPerMonth: [0-9]" src/lib/quota.ts` 가 비어 있는가? (`tier.ts`에서 import해야 한다)
    - `applyRules`가 I/O 없는 순수 함수인가?
-   - `consumeQuota`가 RPC를 호출하는가?
+   - `grep -rn "usage_counters\|sample_used" src/lib/quota.ts` — 테이블을 직접 쓰는 코드가 없는가? (RPC만 호출해야 한다)
+   - `consumeQuota`·`markSampleUsed`가 RPC를 호출하는가?
+   - `supabase/migrations/`에 새 파일을 만들지 않았는가?
    - Anthropic 호출이 없는가?
 3. 결과에 따라 `phases/0-mvp/index.json`의 step 9를 업데이트한다:
-   - 성공 → `"status": "completed"`, `"summary"`에 두 모듈의 공개 함수와 추가한 마이그레이션 파일명을 한 줄로
+   - 성공 → `"status": "completed"`, `"summary"`에 두 모듈의 공개 함수와 호출하는 RPC 이름을 한 줄로
    - 실패 → `"status": "error"` + `"error_message"`
    - 사용자 개입 필요 → `"status": "blocked"` + `"blocked_reason"` 후 중단
 
@@ -114,6 +129,8 @@ npx vitest run src/lib/rules src/lib/quota
 - 쿼터 숫자를 하드코딩하지 마라. 이유: `src/types/tier.ts`가 단일 출처이며, 어긋나면 결제한 사용자가 막힌다.
 - 검사와 차감을 한 함수로 합치지 마라. 이유: AI 호출이 실패했는데 쿼터가 깎이면 사용자가 손해를 본다.
 - 읽고-더하고-쓰는 방식으로 카운트를 증가시키지 마라. 이유: 동시 요청에서 카운트가 새어 나가 무료 사용자가 여러 번 호출한다.
+- `usage_counters`나 `profiles.sample_used`를 애플리케이션에서 직접 쓰려고 하지 마라. 이유: step6이 의도적으로 RLS·컬럼 권한으로 막았다. 막혔다고 정책을 푸는 마이그레이션을 추가하면 쿼터 관문이 통째로 무너진다. RPC를 호출하라.
+- 새 마이그레이션 파일을 만들지 마라. 이유: 필요한 함수 3개는 step6의 `0001_initial.sql`에 이미 있다.
 - 클라이언트가 보낸 기간·티어·잔여 횟수를 신뢰하지 마라. 이유: 우회하면 LLM 비용이 직접 발생한다.
 - Anthropic을 호출하지 마라. 이유: 이 step은 관문만 만든다. 연결은 step11이다.
 - 라우트 핸들러를 만들지 마라. 이유: step11의 범위다.
