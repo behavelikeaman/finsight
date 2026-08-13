@@ -1,99 +1,95 @@
-# Step 12: polar-billing
+# Step 12: identity-account
 
 ## 읽어야 할 파일
 
-- `/CLAUDE.md` — 보안 규칙, service role 사용 범위
-- `/docs/ARCHITECTURE.md` — API 계약, `billing/sync`가 POST인 이유
-- `/docs/ADR.md` — ADR-003, ADR-008
-- `/docs/PRD.md` — 요금제 표
-- `/src/types/api.ts` (step1 — `CheckoutRequest/Response`, `BillingSyncResponse`)
-- `/src/lib/supabase/admin.ts` (step5 — service role. 여기서만 쓴다)
-- `/src/lib/supabase/session.ts` (step6 — `requireUser`, `getEffectivePlan`)
-- `/src/app/(app)/dashboard/page.tsx` (step11 — Pro CTA가 붙을 자리)
+- `/CLAUDE.md` — 인증 규칙
+- `/docs/ARCHITECTURE.md` — "인증 — 두 개의 진입 경로"
+- `/docs/ADR.md` — ADR-016, ADR-018
+- `/src/lib/supabase/auth.ts`, `/src/lib/supabase/session.ts`, `/src/middleware.ts` (step7 산출물 — `decideAuthRoute`를 반드시 읽어라)
+- `/src/types/api.ts` (step1 — `OkResponse`)
 
 ## 작업
 
-Polar 구독 결제를 붙인다. `@polar-sh/sdk`(+ 필요 시 `@polar-sh/nextjs`)를 쓴다.
+Google 계정 연결 플로우와 데이터 삭제를 구현한다. UI는 step13·15에서 붙이고, 여기서는 **동작하는 함수와 라우트**를 만든다.
 
-### 1. `src/services/polar.ts`
+### 1. 두 경로 (`src/lib/supabase/identity.ts`)
+
+step7의 `decideAuthRoute`가 고른 경로를 실제로 수행한다.
 
 ```ts
-export async function createCheckout(params: {
-  userId: string; email?: string; successUrl: string
-}): Promise<{ url: string }>
+/** 익명 세션의 결과를 유지한 채 Google을 연결한다. uid가 그대로 남는다. */
+export async function linkGoogle(redirectTo: string): Promise<{ error?: LinkError }>
 
-export async function fetchSubscription(subscriptionId: string): Promise<{
-  status: string; currentPeriodEnd: string | null
-}>
+/** 기존 계정으로 진입한다. 재방문자 경로. */
+export async function signInGoogle(redirectTo: string): Promise<void>
 
-export async function fetchCustomerSubscription(customerId: string): Promise<{
-  subscriptionId: string; status: string; currentPeriodEnd: string | null
-} | null>
+export type LinkError = 'already_linked' | 'identity_taken' | 'unknown'
 ```
 
-토큰·상품 ID는 `src/lib/env.ts`로 **호출 시점에** 읽는다. `POLAR_SERVER`로 sandbox/production을 가른다.
+- `linkGoogle` → `supabase.auth.linkIdentity({ provider: 'google', options: { redirectTo } })`
+- `signInGoogle` → `supabase.auth.signInWithOAuth({ provider: 'google', options: { redirectTo } })`
 
-체크아웃 생성 시 `metadata`에 `userId`를 넣는다. 이유: 웹훅이 어느 사용자인지 알아야 한다.
+> **익명 세션에 결과가 있을 때 `signInWithOAuth()`를 부르면 새 계정이 만들어져 uid가 버려지고 사용자가 분석을 잃는다.** 호출 전에 반드시 `decideAuthRoute`로 분기하라. 두 함수를 직접 호출하는 코드는 이 파일 밖에 두지 마라.
 
-**TDD 가드 주의**: 테스트 선행 대상이다. Polar SDK를 모킹하라. **실제 Polar API를 호출하는 테스트를 쓰지 마라.**
+### 2. 실패 처리
 
-### 2. `POST /api/billing/checkout`
+`linkIdentity`가 실패해도 **현재 익명 세션과 그 결과는 그대로 남아야 한다.** 세션을 정리하거나 로그아웃시키지 마라.
 
-`requireUser()` → `createCheckout()` → `{ url }` 반환. `successUrl`은 `NEXT_PUBLIC_SITE_URL` 기준의 대시보드 경로에 체크아웃 식별자를 붙인다.
+이미 다른 계정에 연결된 Google이면 `identity_taken`을 반환하고, UI는 이렇게 안내한다:
 
-### 3. `POST /api/billing/sync` — 웹훅 지연 우회
+> "이미 사용 중인 Google 계정입니다. 로그인 후 이 파일을 다시 올려 주세요."
 
-결제 성공 리다이렉트 직후 클라이언트가 호출한다.
+기존 계정과의 **병합은 구현하지 않는다.** MVP 범위 밖이다.
 
-```
-requireUser()
-→ profiles.polar_customer_id / polar_subscription_id 조회
-→ Polar에 직접 조회 (fetchSubscription / fetchCustomerSubscription)
-→ 활성 구독이면 profiles.plan='pro', current_period_end 갱신
-→ { plan, currentPeriodEnd } 반환
-```
+### 3. OAuth 콜백 (`src/app/auth/callback/route.ts`)
 
-> **이 엔드포인트가 없으면 "결제했는데 안 열려요"가 그대로 터진다.** 웹훅은 수 초~수 분 지연될 수 있고, 사용자는 리다이렉트 직후 화면을 본다. 웹훅만 믿고 기다리지 마라.
+`code`를 세션으로 교환하고 원래 위치로 돌려보낸다.
 
-**GET으로 만들지 마라.** 이유: 상태를 변경하므로 프리페치·프리렌더가 호출하면 예기치 않게 실행된다.
-
-### 4. `POST /api/webhooks/polar`
-
-**서명 검증이 최우선이다.** `POLAR_WEBHOOK_SECRET`으로 검증하고, 실패하면 즉시 401을 반환하고 **아무 처리도 하지 마라.** 이유: 검증 없이 처리하면 누구나 자신을 Pro로 만들 수 있다.
-
-처리할 이벤트: 구독 생성·갱신·취소·만료·결제 실패.
-
-상태 반영은 **최신 상태를 그대로 쓰는 방식**으로 한다.
-```
-plan               = 구독이 활성이면 'pro', 아니면 'free'
-current_period_end = 이벤트의 기간 종료 시각
-polar_subscription_id / polar_customer_id 갱신
+```ts
+// GET /auth/callback?code=...&next=/dashboard
+// exchangeCodeForSession(code) → redirect(next ?? '/dashboard')
+// 실패 시 에러 쿼리를 달아 프리뷰로 돌려보낸다. 결과를 잃지 않게.
 ```
 
-이렇게 하면 같은 이벤트를 여러 번 받아도 결과가 같다(멱등). 카운터를 증가시키거나 이벤트를 누적하는 처리를 넣지 마라 — 그 순간 중복 수신이 사고가 된다.
-
-**여기가 service role을 쓰는 유일한 곳이다.** 웹훅에는 사용자 세션이 없으므로 `src/lib/supabase/admin.ts`를 쓴다. 다른 어떤 파일에서도 admin 클라이언트를 import하지 마라.
-
-사용자 식별은 체크아웃 `metadata.userId` 또는 `polar_customer_id` 매칭으로 한다.
+`next` 파라미터는 **같은 오리진의 경로만** 허용한다. 외부 URL을 그대로 리다이렉트하지 마라. 이유: 오픈 리다이렉트 취약점이 된다.
 
 **TDD 가드 주의**: `route.ts`는 테스트 선행 대상이다.
 
-### 5. 해지·만료
+### 4. 데이터 삭제 (`src/app/api/account/route.ts`)
 
-취소 이벤트가 오면 즉시 `free`로 내리지 말고 `current_period_end`까지 `pro`를 유지한다. `effective_plan` DB 함수가 만료를 판정하므로, `current_period_end`만 정확히 넣으면 자동으로 처리된다.
+```ts
+// DELETE /api/account → OkResponse
+```
 
-### 6. 대시보드 연결
+처리: `requireUser()` → 해당 사용자의 `analyses` 삭제(`transactions`는 `ON DELETE CASCADE`로 따라간다) → `user_rules`·`usage_counters` 삭제 → `profiles`의 `sample_used`를 포함한 앱 상태 초기화 → `signOut()`.
 
-step11의 Pro CTA를 `POST /api/billing/checkout` → `url`로 이동하도록 연결한다. 결제 후 돌아오면 **`POST /api/billing/sync`를 먼저 호출한 뒤** 화면을 갱신한다.
+`profiles`의 `tier`·`polar_subscription_id`·`current_period_end`는 **건드리지 마라.** 이유: 구독은 Polar 쪽에 살아 있다. 여기서 지우면 결제한 사용자가 재로그인 시 free가 되고, 웹훅이 다시 올 때까지 복구되지 않는다.
+
+**`auth.users`를 삭제하지 마라.** 이유: admin API가 필요한데 service role 사용을 웹훅 한 곳으로 제한했다. 계정 자체 삭제는 다음 phase다.
+
+따라서 이 기능의 사용자 표기는 **"내 데이터 전체 삭제"** 다. 라우트 주석과 이후 UI 문구 모두 그렇게 쓴다.
+
+> **UI에 "계정 삭제"라고 쓰지 마라.** 이유: 계정은 남는데 사용자가 사라졌다고 믿으면 그 자체가 신뢰 문제다. 금융 데이터에서는 특히 그렇다.
+
+### 5. 분석 삭제 (`src/app/api/analyses/[id]/route.ts`)
+
+```ts
+// DELETE /api/analyses/:id → OkResponse
+```
+
+소유 확인 후 삭제. 남의 분석에는 404(403이 아니다).
 
 ### 테스트
 
-- 서명이 틀린 웹훅 → 401이고 DB 갱신이 **일어나지 않는지**
-- 같은 이벤트를 두 번 보내면 결과가 동일한지(멱등)
-- 취소 이벤트가 `plan`을 즉시 `free`로 바꾸지 않고 `current_period_end`를 세팅하는지
-- `sync`가 미인증에서 401인지
-- `sync`가 Polar 응답으로 `profiles`를 갱신하는지
-- `checkout`이 `metadata.userId`를 넣는지
+Supabase 클라이언트를 모킹한다. 실제 OAuth를 수행하지 마라.
+
+- `decideAuthRoute`가 `'link'`일 때 `linkIdentity`가, `'signin'`일 때 `signInWithOAuth`가 호출되는지
+- `linkIdentity` 실패 시 `signOut`이 **호출되지 않는지** (결과 보존)
+- `identity_taken` 매핑
+- 콜백이 외부 URL `next`를 거부하는지
+- `DELETE /api/account`가 미인증에서 401이고, 정상 시 `analyses` 삭제와 `signOut`을 호출하는지
+- `DELETE /api/account`가 `profiles.tier`를 변경하지 **않는지**
+- `DELETE /api/analyses/:id`가 남의 분석에 404를 반환하는지
 
 ## Acceptance Criteria
 
@@ -101,30 +97,32 @@ step11의 Pro CTA를 `POST /api/billing/checkout` → `url`로 이동하도록 �
 npm run lint
 npm run build
 npm run test
-npx vitest run src/services src/app/api/billing src/app/api/webhooks
+npx vitest run src/lib/supabase/identity src/app/auth src/app/api/account
 ```
 
 ## 검증 절차
 
 1. 위 AC 커맨드를 실행한다.
 2. 아키텍처 체크리스트:
-   - `grep -rn "admin" src/app/api/ --include=*.ts` 가 웹훅 라우트에서만 나오는가?
-   - 서명 검증 실패 시 DB 접근 전에 반환하는가?
-   - `billing/sync`가 POST인가?
-   - 취소 시 즉시 `free`로 내리지 않는가?
-   - 실제 Polar API를 호출하는 테스트가 없는가?
+   - `grep -rn "linkIdentity\|signInWithOAuth" src/` 결과가 `src/lib/supabase/identity.ts`에만 나오는가?
+   - `grep -rn "admin\|service_role" src/app/api/account/` 가 비어 있는가?
+   - `grep -rniE "계정 삭제|계정을 삭제" src/` 가 비어 있는가?
+   - 콜백이 `next`의 오리진을 검사하는가?
+   - `auth.users` 삭제 호출이 없는가? (`grep -rn "admin.auth.deleteUser" src/`)
 3. 결과에 따라 `phases/0-mvp/index.json`의 step 12를 업데이트한다:
-   - 성공 → `"status": "completed"`, `"summary"`에 세 라우트 경로와 멱등 처리 방식을 한 줄로
+   - 성공 → `"status": "completed"`, `"summary"`에 identity 함수 2개, 콜백 경로, 삭제 라우트 2개를 한 줄로
    - 실패 → `"status": "error"` + `"error_message"`
    - 사용자 개입 필요 → `"status": "blocked"` + `"blocked_reason"` 후 중단
 
 ## 금지사항
 
-- 서명 검증 없이 웹훅을 처리하지 마라. 이유: 누구나 자신을 Pro로 만들 수 있다.
-- 웹훅에서 카운터 증가·이벤트 누적 같은 비멱등 처리를 하지 마라. 이유: 중복 수신이 사고가 된다. 최신 상태를 덮어쓰는 방식만 쓴다.
-- `billing/sync`를 GET으로 만들지 마라. 이유: 상태를 변경하므로 프리페치가 호출한다.
-- 결제 반영을 웹훅에만 의존하지 마라. 이유: 지연 동안 사용자가 Free로 보여 "결제했는데 안 열려요"가 발생한다.
-- 웹훅 라우트 밖에서 service role 클라이언트를 쓰지 마라. 이유: RLS가 무력화된다.
-- 취소 즉시 `plan='free'`로 내리지 마라. 이유: 사용자가 결제한 기간을 잃는다.
-- 실제 Polar API를 호출하는 테스트를 쓰지 마라. 이유: 키가 없어 blocked가 되고 이후 step이 멈춘다.
+- `decideAuthRoute` 없이 `signInWithOAuth()`를 호출하지 마라. 이유: 익명 세션에 결과가 있으면 uid가 버려져 사용자가 분석을 잃는다.
+- `linkIdentity` 실패 시 로그아웃시키지 마라. 이유: 사용자가 방금 올린 분석 결과까지 함께 사라진다.
+- 기존 Google 계정과의 병합을 구현하지 마라. 이유: MVP 범위 밖이며, 잘못 구현하면 남의 데이터가 섞인다.
+- `next`에 외부 URL을 허용하지 마라. 이유: 오픈 리다이렉트 취약점이 된다.
+- `auth.users`를 삭제하지 마라. 이유: admin API가 필요한데 service role 사용을 웹훅 한 곳으로 제한했다.
+- `DELETE /api/account`에서 `profiles.tier`·구독 필드를 지우지 마라. 이유: Polar에 구독이 살아 있는데 앱에서만 free가 되어 결제한 사용자가 막힌다.
+- UI 문구나 주석에 "계정 삭제"라고 쓰지 마라. 이유: 계정은 남으며, 사용자가 사라졌다고 믿으면 신뢰 문제가 된다.
+- UI를 만들지 마라. 이유: step13·15의 범위다.
+- 실제 OAuth를 수행하는 테스트를 쓰지 마라. 이유: blocked가 되어 이후 step이 전부 멈춘다.
 - 기존 테스트를 깨뜨리지 마라.

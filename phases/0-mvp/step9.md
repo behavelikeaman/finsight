@@ -1,93 +1,89 @@
-# Step 9: landing-upload
+# Step 9: rules-and-quota
 
 ## 읽어야 할 파일
 
-- `/CLAUDE.md`
-- `/docs/PRD.md` — 사용자 흐름, 디자인 방향
-- `/docs/ARCHITECTURE.md` — 분석 파이프라인 1단계
-- `/src/lib/ingest/index.ts` (step2), `/src/lib/mapping/index.ts` (step3)
-- `/src/lib/supabase/auth.ts` (step6 — `ensureSession`, `decideAuthRoute`)
-- `/src/lib/supabase/identity.ts` (step8 — `linkGoogle`, `signInGoogle`)
-- `/src/types/api.ts` (step1 — `AnalyzeRequest`, `AnalyzeResponse`)
-- `/src/app/globals.css` (step0 — Tailwind `@theme` 토큰)
+- `/CLAUDE.md` — 비용 규칙 절
+- `/docs/ADR.md` — ADR-012(규칙 학습), ADR-013(쿼터), ADR-015(표본), ADR-017(서버 판정)
+- `/src/types/domain.ts`, `/src/types/analysis.ts`, `/src/types/tier.ts` (step1 — `QUOTA`, `SAMPLE_SIZE`)
+- `/src/types/db.ts` (step1 — `user_rules`, `usage_counters` 행 타입)
+- `/src/lib/supabase/session.ts` (step7 — `getEffectiveTier`)
+- `/supabase/migrations/0001_initial.sql` (step6)
 
 ## 작업
 
-`(marketing)` 라우트 그룹에 랜딩과 업로드 퍼널을 만든다. `src/components/`는 TDD 가드 면제이므로 컴포넌트에 유닛 테스트를 강요하지 않는다.
+AI 호출 앞에 세울 **두 개의 관문**을 만든다. 이 step에서는 분류 API를 건드리지 않는다 — 관문만 만들고, 연결은 step11에서 한다.
 
-### 화면 흐름 — 한 페이지 안에서 단계 전환
-
-```
-① 랜딩          "카드 명세서를 그냥 던져보세요"  + 우상단 [로그인]
-      ↓ 파일 드롭 (.csv / .xlsx)
-② 전처리        ensureSession() → ingestFile() → guessMapping()
-      ↓
-③ 컬럼 매핑     날짜│가맹점│금액 드롭다운 + 상위 5행 미리보기
-      ↓ [분석 시작]
-④ 진행 표시     POST /api/analyze
-      ↓
-⑤ 프리뷰        총액 · 카테고리 도넛 · 상위 가맹점 3
-                "현재 결과를 저장하려면 Google 계정을 연결하세요"
-```
-
-### 1. 랜딩 (`src/app/(marketing)/page.tsx`)
-
-카피, 제품 설명, 드롭존. 우상단에 **[로그인]** 진입점을 둔다 — 재방문자가 여기로 들어온다. 클릭 시 `signInGoogle()`.
-
-데모 대시보드 스크린샷 자리를 둔다(정적 이미지 또는 목업 마크업). LLM을 호출하지 마라.
-
-### 2. 드롭존 (`src/components/upload/DropZone.tsx`)
-
-`.csv`, `.xlsx`만 받는다. 그 외 확장자는 거부하고 안내한다. PDF를 던지면 "PDF 명세서는 아직 지원하지 않습니다"로 명확히 알린다.
-
-**파일이 드롭된 이 시점에 `ensureSession()`을 호출한다.** 페이지 로드나 컴포넌트 마운트에서 부르지 마라. 이유: 랜딩을 스쳐간 방문자·크롤러까지 `auth.users` 행을 만든다.
-
-### 3. 컬럼 매핑 UI (`src/components/upload/MappingForm.tsx`)
-
-- `guessMapping()` 결과를 초기값으로 세 개의 드롭다운(날짜·가맹점·금액)
-- 선택된 매핑으로 상위 5행을 파싱해 **결과를 그대로 미리보기**한다. 사용자가 "맞게 읽혔다"를 눈으로 확인하는 것이 이 화면의 목적이다
-- `validateMapping()`의 이슈를 인라인으로 표시한다. `missing`이 있으면 [분석 시작]을 비활성화하고 어느 컬럼이 없는지 밝힌다
-- `unparsable` 이슈는 경고로 띄우되 진행은 막지 않는다
-
-### 4. 분석 요청 (`src/lib/upload/submit.ts`)
+### 1. `src/lib/rules.ts` — 규칙 선적용 (순수 함수)
 
 ```ts
-export async function submitAnalysis(req: AnalyzeRequest): Promise<AnalyzeResponse>
+export interface RuleMatch {
+  row: NormalizedRow
+  classification: Classification
+  accountCode: AccountCode | null
+  ruleId: string
+}
+
+export interface RuleApplyResult {
+  matched: RuleMatch[]     // 규칙이 결정한 건. AI로 보내지 않는다
+  unmatched: NormalizedRow[]  // AI로 보낼 건
+}
+
+export function applyRules(rows: NormalizedRow[], rules: UserRuleRow[]): RuleApplyResult
+
+/** 사용자가 고친 거래에서 규칙 패턴을 뽑는다. */
+export function derivePattern(merchant: string): string
 ```
 
-`normalizeRows()`로 만든 배열을 `POST /api/analyze`에 JSON으로 보낸다.
+**매칭 규칙**: `merchant_pattern`을 정규화(공백 제거, 소문자화)한 뒤 가맹점명에 **부분 문자열로 포함**되면 매칭. 정규식을 쓰지 마라 — 사용자가 입력한 문자열이 정규식으로 해석되면 오작동하고, `.*`가 들어오면 전건이 매칭된다.
 
-**원본 파일을 보내지 마라.** `FormData`·`File`을 쓰지 마라. 이유: 본문 크기 제한에 걸리고, 카드번호와 원본이 서버에 도달한다.
+패턴이 여러 개 걸리면 **가장 긴 패턴이 이긴다.** 이유: `스타벅스`와 `스타벅스 강남점`이 둘 다 있으면 구체적인 쪽이 사용자의 최근 의도다.
 
-10,000행을 넘으면 요청 전에 막고 안내한다.
+`derivePattern`은 가맹점명에서 지점·번호 꼬리를 떼어 재사용 가능한 패턴을 만든다(`스타벅스 강남점` → `스타벅스`). 다만 원본이 짧으면(4자 이하) 그대로 쓴다. 이유: 과하게 일반화한 패턴은 무관한 거래까지 잡는다.
 
-**TDD 가드 주의**: `src/lib/upload/submit.ts`는 `lib/` 아래이므로 테스트 선행 대상이다. `fetch`를 모킹해 본문이 JSON이고 파일이 실리지 않는지, 상한 초과를 막는지 검증하라.
+`applyRules`는 **I/O가 없다.** 규칙 조회는 호출부(step11)가 하고, 여기에는 배열로 넘긴다.
 
-### 5. 중복 응답 처리
+> 이 관문이 원가 구조의 핵심이다. 규칙에 걸린 거래는 AI로 나가지 않으므로, 재방문 사용자일수록 호출 건수가 줄어든다.
 
-`{ ok:false, reason:'duplicate' }`를 받으면 모달로 2지선다를 띄운다.
+### 2. `src/lib/quota.ts` — 사용량 검사
 
+```ts
+export type QuotaKind = 'classify' | 'chat'
+
+export type QuotaVerdict =
+  | { allowed: true; left: number }
+  | { allowed: false; reason: 'quota_exceeded' | 'tier_required' }
+
+/** 현재 기간(YYYY-MM)의 사용량을 조회해 판정한다. 차감은 하지 않는다. */
+export async function checkQuota(userId: string, kind: QuotaKind): Promise<QuotaVerdict>
+
+/** 성공적으로 호출한 뒤 1 증가. 원자적으로 처리한다. */
+export async function consumeQuota(userId: string, kind: QuotaKind): Promise<void>
+
+/** 익명 표본 1회 제한. profiles.sample_used 를 본다. */
+export async function checkSampleAllowance(userId: string): Promise<boolean>
+export async function markSampleUsed(userId: string): Promise<void>
 ```
-locked === false → "이미 분석한 명세서입니다"            [취소] [기존 결과 보기]
-locked === true  → "이미 분석한 명세서입니다 (2026년 5월)
-                    해당 기간은 Pro에서 열람할 수 있습니다"  [취소] [Pro 보기]
-```
 
-**"그래도 추가" 선택지를 만들지 마라.** 이유: `UNIQUE(owner_id, fingerprint)` 제약과 충돌해 저장이 실패한다.
+한도는 `src/types/tier.ts`의 `QUOTA`에서 읽는다. **숫자를 하드코딩하지 마라.** 이유: 랜딩의 요금제 표(step13)와 어긋나면 사용자가 결제하고도 막힌다.
 
-### 6. 프리뷰 (`src/components/preview/PreviewPanel.tsx`)
+`free` 티어의 `chatPerMonth`가 0이므로, `kind: 'chat'`이고 티어가 free면 `reason: 'tier_required'`를 반환한다(쿼터 소진이 아니라 등급 문제다). 이유: UI가 "이번 달 다 썼습니다"와 "Pro 기능입니다"를 다르게 안내해야 한다.
 
-응답의 `periods`에서 최신 기간을 보여준다. 총액, 카테고리 도넛, 상위 가맹점 3개.
+**검사와 차감을 분리하는 이유**: AI 호출이 실패했을 때 쿼터를 먹으면 안 된다. `checkQuota` → 호출 → 성공 시에만 `consumeQuota`.
 
-AI 인사이트 자리에는 **"로그인하면 AI 분석을 생성합니다"** 로 표기한다.
+`consumeQuota`는 `usage_counters`에 upsert하며 **원자적으로 증가**시켜야 한다. Postgres 함수(`increment_usage(uid, period, kind)`)를 `supabase/migrations/0002_usage.sql`에 추가하고 RPC로 부른다. 애플리케이션에서 읽고-더하고-쓰지 마라 — 동시 요청에서 카운트가 새어 나간다.
 
-> **없는 인사이트를 블러 처리해 있는 것처럼 보이게 하지 마라.** 이유: 익명 단계에서는 LLM을 호출하지 않으므로 인사이트가 실제로 존재하지 않는다. 가짜 블러는 사용자를 속이는 것이다.
+기간(`period`)은 서버 시각 기준 `YYYY-MM`이다. 클라이언트가 보낸 값을 쓰지 마라.
 
-CTA는 `decideAuthRoute()`로 분기한다. 익명 세션에 결과가 있으므로 정상 흐름에서는 `linkGoogle()`이 불린다.
+### 테스트
 
-### 디자인
+- `applyRules`: 부분 문자열 매칭, 가장 긴 패턴 우선, 매칭된 건이 `unmatched`에 없는지, 빈 규칙 배열
+- `applyRules`: `merchant_pattern`에 `.*`나 `[a-z]+`가 들어와도 정규식으로 해석되지 않는지
+- `derivePattern`: 지점 꼬리 제거, 짧은 이름은 그대로
+- `checkQuota`: free/pro 각각의 한도 경계, chat + free → `tier_required`
+- `consumeQuota`: RPC를 호출하는지 (읽고-쓰기 패턴이 아닌지)
+- `checkSampleAllowance`: `sample_used`가 true면 false 반환
 
-라이트모드 고정. 색은 `globals.css`의 `@theme` 토큰만 쓴다. hex를 컴포넌트에 하드코딩하지 마라. 금액은 `tabular-nums` + 천 단위 구분자 + 원화 표기.
+Supabase는 모킹한다. 실제 DB에 접속하지 마라.
 
 ## Acceptance Criteria
 
@@ -95,29 +91,30 @@ CTA는 `decideAuthRoute()`로 분기한다. 익명 세션에 결과가 있으므
 npm run lint
 npm run build
 npm run test
-npx vitest run src/lib/upload
+npx vitest run src/lib/rules src/lib/quota
 ```
 
 ## 검증 절차
 
 1. 위 AC 커맨드를 실행한다.
 2. 아키텍처 체크리스트:
-   - `grep -rn "signInAnonymously\|ensureSession" src/app/(marketing)/` 가 페이지·레이아웃이 아니라 드롭 핸들러에서만 나오는가?
-   - `grep -rn "FormData\|new File(" src/lib/upload/ src/components/upload/` 가 비어 있는가?
-   - `grep -rn "blur" src/components/preview/` — 인사이트를 가짜로 블러 처리하지 않았는가?
-   - 색상 hex가 컴포넌트에 하드코딩되지 않았는가?
+   - `grep -rn "new RegExp\|RegExp(" src/lib/rules.ts` 가 비어 있는가?
+   - `grep -rn "classifyPerMonth: [0-9]\|chatPerMonth: [0-9]" src/lib/quota.ts` 가 비어 있는가? (`tier.ts`에서 import해야 한다)
+   - `applyRules`가 I/O 없는 순수 함수인가?
+   - `consumeQuota`가 RPC를 호출하는가?
+   - Anthropic 호출이 없는가?
 3. 결과에 따라 `phases/0-mvp/index.json`의 step 9를 업데이트한다:
-   - 성공 → `"status": "completed"`, `"summary"`에 페이지·컴포넌트 경로와 단계 전환 방식을 한 줄로
+   - 성공 → `"status": "completed"`, `"summary"`에 두 모듈의 공개 함수와 추가한 마이그레이션 파일명을 한 줄로
    - 실패 → `"status": "error"` + `"error_message"`
    - 사용자 개입 필요 → `"status": "blocked"` + `"blocked_reason"` 후 중단
 
 ## 금지사항
 
-- 페이지 로드·마운트 시점에 익명 세션을 만들지 마라. 이유: 구경만 한 방문자와 크롤러까지 계정을 만든다. 파일 드롭 시점에만.
-- 원본 파일을 서버로 보내지 마라. 이유: 본문 크기 제한과 개인정보 노출.
-- 존재하지 않는 AI 인사이트를 블러로 위장하지 마라. 이유: 익명 단계에서는 생성하지 않으므로 사용자를 속이는 것이다.
-- 중복 모달에 "그래도 추가"를 넣지 마라. 이유: DB unique 제약과 충돌해 저장이 실패한다.
-- 대시보드나 결제 화면을 만들지 마라. 이유: step11·12의 범위다.
-- LLM을 호출하지 마라. 이유: 인사이트는 step10에서 계정 연결 후 생성한다.
-- 다크모드 분기를 만들지 마라. 이유: 라이트모드 고정이다.
+- `merchant_pattern`을 정규식으로 해석하지 마라. 이유: 사용자가 입력한 문자열이며, `.*`가 들어오면 전건이 매칭돼 AI 분류가 통째로 무력화된다.
+- 쿼터 숫자를 하드코딩하지 마라. 이유: `src/types/tier.ts`가 단일 출처이며, 어긋나면 결제한 사용자가 막힌다.
+- 검사와 차감을 한 함수로 합치지 마라. 이유: AI 호출이 실패했는데 쿼터가 깎이면 사용자가 손해를 본다.
+- 읽고-더하고-쓰는 방식으로 카운트를 증가시키지 마라. 이유: 동시 요청에서 카운트가 새어 나가 무료 사용자가 여러 번 호출한다.
+- 클라이언트가 보낸 기간·티어·잔여 횟수를 신뢰하지 마라. 이유: 우회하면 LLM 비용이 직접 발생한다.
+- Anthropic을 호출하지 마라. 이유: 이 step은 관문만 만든다. 연결은 step11이다.
+- 라우트 핸들러를 만들지 마라. 이유: step11의 범위다.
 - 기존 테스트를 깨뜨리지 마라.

@@ -7,14 +7,19 @@
     { "step": 2, "name": "file-ingest", "status": "pending" },
     { "step": 3, "name": "column-mapping", "status": "pending" },
     { "step": 4, "name": "analysis-engine", "status": "pending" },
-    { "step": 5, "name": "supabase-schema", "status": "pending" },
-    { "step": 6, "name": "auth-session", "status": "pending" },
-    { "step": 7, "name": "analyze-api", "status": "pending" },
-    { "step": 8, "name": "identity-account", "status": "pending" },
-    { "step": 9, "name": "landing-upload", "status": "pending" },
-    { "step": 10, "name": "insight-api", "status": "pending" },
-    { "step": 11, "name": "dashboard-ui", "status": "pending" },
-    { "step": 12, "name": "polar-billing", "status": "pending" },
-    { "step": 13, "name": "deploy-config", "status": "pending" }
+    { "step": 5, "name": "redaction", "status": "pending" },
+    { "step": 6, "name": "supabase-schema", "status": "pending" },
+    { "step": 7, "name": "auth-session", "status": "pending" },
+    { "step": 8, "name": "analyze-api", "status": "pending" },
+    { "step": 9, "name": "rules-and-quota", "status": "pending" },
+    { "step": 10, "name": "anthropic-service", "status": "pending" },
+    { "step": 11, "name": "classify-api", "status": "pending" },
+    { "step": 12, "name": "identity-account", "status": "pending" },
+    { "step": 13, "name": "landing-upload", "status": "pending" },
+    { "step": 14, "name": "corrections-api", "status": "pending" },
+    { "step": 15, "name": "dashboard-ui", "status": "pending" },
+    { "step": 16, "name": "chat-api", "status": "pending" },
+    { "step": 17, "name": "polar-billing", "status": "pending" },
+    { "step": 18, "name": "deploy-config", "status": "pending" }
   ]
 }

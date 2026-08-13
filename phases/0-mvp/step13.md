@@ -1,100 +1,96 @@
-# Step 13: deploy-config
+# Step 13: landing-upload
 
 ## 읽어야 할 파일
 
-- `/CLAUDE.md`
-- `/docs/PRD.md`, `/docs/ARCHITECTURE.md`
-- `/.env.example`
-- `/supabase/migrations/` (step5 산출물 — 적용해야 할 파일 목록)
-- `/phases/0-mvp/index.json` — 앞선 step들의 summary
+- `/CLAUDE.md` — 제품 경계, 인증 규칙, 코드 배치
+- `/docs/PRD.md` — 사용자, 사용자 흐름, 요금제, 디자인 절
+- `/docs/ADR.md` — ADR-001, ADR-009, ADR-010, ADR-015
+- `/src/lib/ingest/index.ts` (step2), `/src/lib/mapping/index.ts` (step3)
+- `/src/lib/supabase/auth.ts` (step7 — `ensureSession`, `decideAuthRoute`)
+- `/src/lib/supabase/identity.ts` (step12 — `linkGoogle`, `signInGoogle`)
+- `/src/types/api.ts`, `/src/types/tier.ts` (step1 — `AnalyzeRequest`, `ClassifyRequest`, `QUOTA`, `SAMPLE_SIZE`)
+- `/src/app/globals.css` (step0 — Tailwind `@theme` 토큰)
 
 ## 작업
 
-배포 설정 파일과 인수인계 문서를 만든 뒤, **이 step은 `blocked`로 종료한다.**
+`src/app/(marketing)/`에 랜딩과 업로드 흐름을 만든다. 이 step이 완료되면 **"명세서를 올리면 AI가 경비를 가른다"는 제품 핵심 가설이 실제로 검증 가능한 상태**가 된다.
 
-이것은 실패가 아니라 설계된 종료다. 여기서부터는 외부 서비스 계정과 키가 필요해 자동화할 수 없다.
+### 대상 독자
 
-### 1. `vercel.json`
+한국의 프리랜서·1인 사업자다. "AI로 소비 패턴을 분석해드립니다" 같은 일반론은 이 사람에게 아무 의미가 없다. 카피는 구체적인 상황에서 출발해야 한다: 신고철에 카드 명세서를 열어 사업경비를 손으로 골라내는 그 작업.
 
-빌드 커맨드와 리전 정도만 담는다. 과하게 설정하지 마라.
-
-### 2. `README.md`
-
-프로젝트 개요, 로컬 실행 방법(`npm install` → `.env.local` 준비 → `npm run dev`), 스크립트 설명. 이미 있으면 갱신한다.
-
-### 3. `docs/DEPLOY.md`
-
-아래 체크리스트를 **순서대로 수행 가능한 형태**로 쓴다. 각 항목에 어디서 무엇을 얻어 어느 환경변수에 넣는지 명시한다.
+### 화면 흐름
 
 ```
-1. Supabase 프로젝트 생성
-   - Project Settings > API 에서 URL, anon key, service_role key 확보
-   - → NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY / SUPABASE_SERVICE_ROLE_KEY
-
-2. Supabase 인증 설정  ← 이 셋을 켜지 않으면 전체 플로우가 죽는다
-   - Authentication > Anonymous Sign-Ins  활성화
-   - Authentication > Manual Linking      활성화
-   - Authentication > Providers > Google  활성화
-
-3. Google OAuth 클라이언트 발급
-   - Google Cloud Console > OAuth 2.0 클라이언트 ID 생성
-   - 승인된 리디렉션 URI: <SUPABASE_URL>/auth/v1/callback
-   - client id/secret을 Supabase Google provider에 등록
-
-4. 마이그레이션 적용
-   - supabase/migrations/0001~0004 를 순서대로 적용
-   - 적용 후 4개 테이블에 RLS가 켜졌는지 확인
-
-5. Anthropic 키 발급 → ANTHROPIC_API_KEY
-
-6. Polar 설정
-   - Pro 상품 생성 → POLAR_PRO_PRODUCT_ID
-   - Organization Access Token → POLAR_ACCESS_TOKEN
-   - 웹훅 엔드포인트 등록: <SITE_URL>/api/webhooks/polar
-   - 웹훅 시크릿 → POLAR_WEBHOOK_SECRET
-   - 개발 중에는 POLAR_SERVER=sandbox
-
-7. Vercel
-   - 저장소 연결
-   - 위 환경변수 전부 등록 (NEXT_PUBLIC_SITE_URL은 실제 도메인)
-   - 배포
-
-8. 배포 후 확인 — 아래 종단 검증 14항목 수행
+1. 랜딩 (Server Component)      — 히어로 + 드롭존 + 요금제 + 고지
+2. 파일 드롭 (Client)           — ensureSession() → ingestFile()
+3. 컬럼 매핑 확인 (Client)      — guessMapping() 결과를 드롭다운으로 교정
+4. 분석 실행 (Client)           — normalizeRows() → POST /api/analyze
+5. 집계 프리뷰 (Client)         — 총액·월별·상위 가맹점
+6. 표본 분류 (Client)           — POST /api/analyses/:id/classify { mode:'sample' }
+7. 계정 연결 유도               — decideAuthRoute() → linkGoogle() | signInGoogle()
 ```
 
-### 4. 종단 검증 체크리스트
+### 1. 랜딩 (`src/app/(marketing)/page.tsx`)
 
-아래 14항목을 `docs/DEPLOY.md`에 그대로 담는다. **★ 표시는 화면이 아니라 네트워크 탭·DB로 직접 확인해야 하는 항목**이다 — 눈으로만 보면 통과한 것처럼 보이지만 실제로는 뚫려 있을 수 있다.
+**Server Component로 작성한다.** 드롭존만 Client다.
 
-1. EUC-KR + 상단 안내문 + 하단 합계 행이 있는 CSV 업로드 → 한글이 깨지지 않고 **총액이 2배가 아닌지**
-2. 같은 내용의 .xlsx 업로드 → 동일한 결과
-3. 컬럼 매핑을 일부러 틀리게 바꾸면 경고가 뜨는지
-4. ★ 네트워크 탭: `/api/analyze` 요청 본문이 **JSON 배열이고 원본 파일이 아닌지**
-5. ★ 네트워크 탭: 프리뷰 응답에 **AI 인사이트 본문이 없는지**
-6. Google 계정 연결 후 분석이 그대로 내 것인지 (uid 유지). 연결 도중 취소해도 결과가 남는지
-7. 로그아웃 후 랜딩 [로그인]으로 재진입 → 히스토리가 그대로 보이는지
-8. ★ 랜딩만 방문하고 이탈 → Supabase `auth.users`에 행이 **생기지 않는지**
-9. 명세서가 1개일 때 "다음 달 비교" 안내가 뜨는지
-10. 같은 파일 재업로드 → "취소 / 기존 결과 보기". 기존이 잠긴 기간이면 "Pro에서 열람"으로 문구가 바뀌는지
-11. ★ 2개월치 업로드 후 Free 상태에서 잠긴 기간 응답에 **금액이 없는지**
-12. Polar 테스트 결제 → **웹훅 도착 전** 리다이렉트 시점에 잠금이 풀리는지. 이후 인사이트가 `deep`으로 생성되는지
-13. ★ 내 데이터 삭제 후 public 테이블 잔여 행이 0인지. UI 문구가 **"계정 삭제"가 아닌지**
-14. 대시보드 인쇄 미리보기에서 차트가 잘리지 않는지
+- 히어로 — 문제 서술이 먼저, 기능 나열은 그 다음
+- 요금제 표 — 숫자는 `src/types/tier.ts`의 `QUOTA`에서 읽는다. **하드코딩하지 마라**
+- 데이터 취급 고지 — "원본 파일은 서버로 전송되지 않습니다", "거래내역은 분석을 위해 국외(Anthropic)로 전송됩니다", "카드번호는 저장하지 않습니다". 이 문구를 드롭존 근처에 둔다. 숨기지 마라
+- **세무 고지** — "분류 결과는 참고용이며, 최종 판단은 세무 대리인과 상의하세요"
 
-### 5. 이 step을 blocked로 종료
+### 2. 드롭존 (`src/components/upload/DropZone.tsx`)
 
-`phases/0-mvp/index.json`의 step 13을 다음과 같이 기록한다.
+`'use client'`. `.csv`·`.xlsx`만 받는다.
 
-```json
-{
-  "step": 13,
-  "name": "deploy-config",
-  "status": "blocked",
-  "blocked_reason": "외부 서비스 설정과 키 발급이 필요합니다. docs/DEPLOY.md의 1~8단계를 수행한 뒤 .env.local을 채우고, phases/0-mvp/index.json에서 이 step의 status를 pending으로 되돌린 뒤 재실행하세요. 특히 Supabase의 Anonymous Sign-Ins와 Manual Linking을 켜지 않으면 업로드·계정 연결 플로우 전체가 동작하지 않습니다."
-}
+**드롭 시점에 `ensureSession()`을 호출한다.** 랜딩이 렌더될 때가 아니다. 이유: 구경꾼·크롤러까지 `auth.users` 행을 만들면 안 된다.
+
+`ingestFile()`은 브라우저에서 실행된다. 10,000행 초과는 여기서 잡아 안내한다.
+
+### 3. 컬럼 매핑 UI (`src/components/upload/MappingPanel.tsx`)
+
+`guessMapping()` 결과를 미리 채운 드롭다운 3개(날짜/가맹점/금액)와, 상위 5행 미리보기 표를 함께 보여준다.
+
+**미리보기가 있어야 하는 이유**: 매핑이 맞는지는 값을 봐야 안다. 헤더 이름만으로는 원화 컬럼과 외화 컬럼을 구분하지 못한다.
+
+`validateMapping()`의 이슈를 인라인으로 표시한다. `missing`이면 실행 버튼을 막는다.
+
+### 4. 프리뷰 (`src/components/preview/PreviewPanel.tsx`)
+
+`/api/analyze` 응답의 `summary`를 렌더한다 — 총액, 월별, 상위 가맹점. **여기까지는 LLM이 관여하지 않았다.**
+
+이어서 `mode:'sample'`로 분류를 요청하고, 돌아온 20건을 분류 상태별 색으로 표시한다.
+
+나머지 건에 대한 문구:
+
+> "상위 {SAMPLE_SIZE}건을 분류했습니다. 나머지 {n}건은 Google 계정을 연결하면 분류합니다."
+
+**나머지 건을 블러 처리하지 마라.** 아직 분류되지 않았을 뿐 가려진 값이 없다. 없는 결과를 있는 것처럼 위장하는 UI를 만들지 마라 — 개발자도구로 걷히기도 하고, 정직하지도 않다.
+
+`sample_used`로 거부되면(`reason:'sample_used'`) 집계 프리뷰만 보여주고 계정 연결을 유도한다.
+
+### 5. 계정 연결 (`src/components/auth/ConnectPanel.tsx`)
+
+**반드시 `decideAuthRoute()`로 분기한다.**
+
+```
+isAnonymous && 방금 만든 분석이 있음  → linkGoogle()
+그 외                                → signInGoogle()
 ```
 
-`blocked_reason`은 사용자가 그것만 읽고 다음 행동을 할 수 있어야 한다. "설정이 필요함" 같은 모호한 문장을 쓰지 마라.
+이 판정을 여기서 다시 구현하지 마라. `src/lib/supabase/auth.ts`의 함수를 부른다.
+
+`identity_taken` 에러는 step12에 정의된 문구로 안내한다.
+
+### 6. 중복 업로드
+
+`/api/analyze`가 `reason:'duplicate'`를 반환하면 "취소 / 기존 결과 보기" 두 선택지를 제시한다. 조용히 넘어가거나 새로 저장하지 마라.
+
+### 디자인
+
+`src/app/globals.css`의 `@theme` 토큰만 쓴다. hex를 컴포넌트에 하드코딩하지 마라.
+색은 **분류 상태 3종(business/personal/review)에만** 쓴다. 금액은 tabular-nums, 천 단위 구분자, 원화 표기.
 
 ## Acceptance Criteria
 
@@ -102,24 +98,33 @@
 npm run lint
 npm run build
 npm run test
-test -f vercel.json && test -f docs/DEPLOY.md && echo "배포 문서 OK"
 ```
 
 ## 검증 절차
 
 1. 위 AC 커맨드를 실행한다.
-2. 문서 체크리스트:
-   - `docs/DEPLOY.md`의 각 항목이 `.env.example`의 환경변수와 1:1로 대응하는가?
-   - Supabase Anonymous Sign-Ins와 Manual Linking 활성화가 명시돼 있는가?
-   - 종단 검증 항목이 포함돼 있는가?
-3. `phases/0-mvp/index.json`의 step 13을 위 형식대로 **`blocked`** 로 기록하고 즉시 종료한다.
+2. 아키텍처 체크리스트:
+   - `grep -rn "ensureSession" src/` 가 드롭 핸들러에만 있는가? (`page.tsx`·`layout.tsx`에 있으면 위반)
+   - `grep -rn "linkIdentity\|signInWithOAuth" src/components/` 가 비어 있는가? (`identity.ts` 경유여야 한다)
+   - `grep -rniE "blur|backdrop-filter" src/components/preview/` 가 비어 있는가?
+   - `grep -rn "#[0-9a-fA-F]\{6\}" src/components/` 가 비어 있는가?
+   - 요금제 숫자가 `src/types/tier.ts`에서 오는가?
+   - 세무 고지 문구가 프리뷰 화면에 있는가?
+   - `FormData`로 파일을 전송하는 코드가 없는가?
+3. 결과에 따라 `phases/0-mvp/index.json`의 step 13을 업데이트한다:
+   - 성공 → `"status": "completed"`, `"summary"`에 생성한 페이지·컴포넌트 경로와 흐름 단계를 한 줄로
+   - 실패 → `"status": "error"` + `"error_message"`
+   - 사용자 개입 필요 → `"status": "blocked"` + `"blocked_reason"` 후 중단
 
 ## 금지사항
 
-- 실제 배포를 시도하지 마라. 이유: 자격 증명이 없고, 배포는 사용자의 결정이다.
-- Supabase·Polar·Google에 실제로 접속하거나 리소스를 만들지 마라. 이유: 계정과 키가 없다.
-- `.env.local`을 만들지 마라. 이유: 실제 키를 담는 파일이며 사용자가 직접 채운다.
-- `.env.example`을 덮어쓰지 마라. 이유: 이미 검증된 목록이다. 항목이 빠졌으면 추가만 한다.
-- 이 step을 `completed`로 기록하지 마라. 이유: 외부 설정이 남아 있으며, `blocked`가 이 step의 정상 종료 상태다.
-- 앞선 step의 코드를 수정하지 마라. 이유: 이 step은 설정과 문서만 다룬다.
+- 랜딩 렌더 시점에 `ensureSession()`을 호출하지 마라. 이유: 구경꾼·크롤러까지 `auth.users` 행을 만든다. 드롭 시점에만.
+- 원본 파일을 서버로 보내지 마라. `FormData`를 쓰지 마라. 이유: 카드번호와 원본이 서버에 도달하고 본문 크기 제한에 걸린다.
+- 분류되지 않은 거래를 블러로 가리지 마라. 이유: 가려진 값이 아니라 아직 없는 값이다. 위장하지 않고 그대로 안내한다.
+- `decideAuthRoute` 없이 `signInGoogle()`을 부르지 마라. 이유: 익명 세션의 분석 결과가 통째로 사라진다.
+- 요금제 숫자를 하드코딩하지 마라. 이유: 서버 쿼터와 어긋나면 사용자가 결제하고도 막힌다.
+- 세무 판단 문구("경비 처리 가능합니다" 등)를 UI에 쓰지 마라. 이유: 제품 경계이며 법적 위험이다.
+- 색을 분류 상태 외의 곳에 쓰지 마라. 이유: 금융 표에서 색이 흔해지면 분류 상태가 눈에 띄지 않는다.
+- hex 색상값을 컴포넌트에 하드코딩하지 마라. 이유: 테마 토큰이 단일 출처다.
+- 대시보드를 만들지 마라. 이유: step15의 범위다.
 - 기존 테스트를 깨뜨리지 마라.

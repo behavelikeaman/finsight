@@ -4,7 +4,7 @@
 
 - `/CLAUDE.md`
 - `/docs/ARCHITECTURE.md` — 디렉토리 구조와 분석 파이프라인 1단계
-- `/docs/ADR.md` — ADR-009(브라우저 전처리), ADR-011(ExcelJS)
+- `/docs/ADR.md` — ADR-006(브라우저 전처리), ADR-008(ExcelJS)
 - `/src/types/domain.ts` (step1 산출물 — `RawTable`, `SourceKind`)
 - `/vitest.config.ts` (step0 산출물)
 
@@ -112,5 +112,5 @@ npx vitest run src/lib/ingest
 - `fs`, `path`, `Buffer` 같은 Node 전용 API를 쓰지 마라. 이유: 이 코드는 브라우저에서도 실행된다.
 - 헤더를 첫 행으로 단정하지 마라. 이유: 카드사 명세서는 상단에 안내문이 붙어 나온다.
 - 상한 초과 시 조용히 잘라내지 마라. 이유: 사용자가 일부만 분석된 사실을 모른 채 잘못된 결론을 얻는다.
-- 컬럼 매핑·카테고리 분류·집계를 여기서 하지 마라. 이유: 각각 step3, step4의 범위다.
+- 컬럼 매핑·집계·경비 분류를 여기서 하지 마라. 이유: 각각 step3, step4, step10·11의 범위다.
 - 기존 테스트를 깨뜨리지 마라.

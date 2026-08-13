@@ -2,85 +2,78 @@
 
 ## 읽어야 할 파일
 
-- `/CLAUDE.md`
-- `/docs/ARCHITECTURE.md` — 데이터 모델의 잠금 판정과 fingerprint 정의
-- `/docs/PRD.md` — 요금제와 잠금 정책
-- `/src/types/domain.ts`, `/src/types/analysis.ts` (step1)
+- `/CLAUDE.md` — 데이터 무결성 규칙
+- `/docs/ARCHITECTURE.md` — 데이터 모델의 fingerprint 정의
+- `/docs/ADR.md` — ADR-006(브라우저 전처리), ADR-011(확신도)
+- `/src/types/domain.ts`, `/src/types/analysis.ts`, `/src/types/tier.ts` (step1)
 - `/src/lib/mapping/index.ts` (step3 — 입력이 되는 `NormalizedRow`의 실제 형태)
 
 ## 작업
 
-`src/lib/analysis/`에 분류·집계·중복판정·잠금판정을 구현한다. **전부 I/O 없는 순수 함수다.** 이 프로젝트의 모든 금액 계산은 여기서만 일어난다.
+`src/lib/analysis/`에 집계·중복판정·확신도 버킷팅을 구현한다. **전부 I/O 없는 순수 함수다.** 이 프로젝트의 모든 금액 계산은 여기서만 일어난다.
+
+**여기서 경비 분류를 하지 않는다.** 사업경비/개인지출 판단은 AI가 한다(step10·11). 이 step은 숫자를 다루는 층이다.
 
 ### 공개 인터페이스 (`src/lib/analysis/index.ts`)
 
 ```ts
-export function categorize(merchant: string): Category
-export function aggregateByPeriod(rows: NormalizedRow[]): PeriodSummary[]
+export function summarize(rows: NormalizedRow[]): AnalysisSummary
 export function computeFingerprint(rows: NormalizedRow[]): string
-export function applyLocks(periods: PeriodSummary[], plan: Plan): PeriodView[]
+export function bucketByClassification(txs: ClassifiedTransaction[]): ClassifiedView
+export function pickSample(txs: ClassifiedTransaction[], size: number): ClassifiedTransaction[]
 ```
 
-### 1. 카테고리 분류 (`categorize.ts`)
+### 1. 집계 (`summarize.ts`)
 
-가맹점명 키워드 규칙으로 `Category`를 정한다. 한국 가맹점명 기준의 키워드 목록을 카테고리별로 둔다.
+- `totalKrw` — 전체 합. **정수 연산만.** 음수(환불) 행도 그대로 더한다
+- `periods` — `occurredOn`의 앞 7자리로 `YYYY-MM` 그룹핑, 오름차순
+- `topMerchants` — 가맹점명별 합계 내림차순 상위 10건
+- `rowCount` — 행 수
 
-- `food` 배달의민족, 쿠팡이츠, 요기요, 식당, 김밥, 치킨, 피자
-- `cafe` 스타벅스, 투썸, 이디야, 메가커피, 커피, 카페
-- `transport` 택시, 카카오T, 지하철, 버스, 주유, GS칼텍스, SK에너지, 하이패스
-- `subscription` 넷플릭스, 유튜브, 스포티파이, 왓챠, 애플, 구글, 쿠팡와우, ChatGPT, OpenAI
-- `shopping` 쿠팡, 11번가, G마켓, 무신사, 올리브영, 다이소
-- `medical` 병원, 의원, 약국, 치과, 한의원
-- `living` 통신, SKT, KT, LG유플러스, 전기, 도시가스, 관리비
-- `culture` CGV, 메가박스, 롯데시네마, 서점, 教보문고
-- `travel` 항공, 호텔, 야놀자, 여기어때, 아고다
-- 어디에도 안 걸리면 `etc`
+가맹점명은 집계 전에 정규화한다: 앞뒤 공백 제거, 연속 공백 1칸으로, 말미의 지점 표기(`강남점`, `1호점`)는 **제거하지 않는다.** 이유: 지점이 다르면 성격이 다를 수 있고(본사 근처 카페 vs 여행지 카페), 병합하면 되돌릴 수 없다.
 
-대소문자·공백을 정규화해 비교한다. 규칙은 데이터로 분리해 테스트에서 확인 가능하게 둔다.
+부동소수점을 거치지 마라. `reduce`로 정수를 누적한다.
 
-### 2. 월별 집계 (`aggregate.ts`)
-
-`occurredOn`의 `YYYY-MM`으로 묶는다. **한 파일에 여러 달이 섞여 있어도 각각 분리된다.**
-
-각 `PeriodSummary`:
-- `totalKrw` — 해당 월 합계. 음수(환불)는 그대로 차감된다
-- `byCategory` — 카테고리별 합계. 모든 `Category` 키를 포함하고 없으면 0
-- `topMerchants` — 금액 내림차순 상위 5개
-- `etcRatio` — `etc` 카테고리 금액 / 총액의 절대값 기준 비율. 0~1
-
-정수 연산만 쓴다. `parseFloat`·부동소수점 누적을 쓰지 마라.
-
-### 3. fingerprint (`fingerprint.ts`)
+### 2. fingerprint (`fingerprint.ts`)
 
 ```
-fingerprint = sha256( 정렬된 "occurredOn|merchant|amountKrw" 줄들을 개행으로 연결 )
+정렬 키: `${occurredOn}|${merchant}|${amountKrw}` 문자열의 사전순
+fingerprint = sha256(정렬된 전체 행을 개행으로 이은 문자열)
 ```
 
-정렬은 문자열 기준으로 결정적이어야 한다. 같은 입력이면 항상 같은 값, 한 행이라도 다르면 다른 값.
+**정렬 후 해싱하는 이유**: 같은 명세서를 다른 순서로 내려받아도 같은 지문이 나와야 중복이 잡힌다.
 
-브라우저·서버 양쪽에서 도는 코드이므로 Node `crypto` 모듈을 쓰지 말고 **Web Crypto(`crypto.subtle.digest`)** 를 쓴다. 따라서 이 함수는 `Promise<string>`을 반환해도 된다 — 시그니처를 그렇게 잡아라.
+`crypto.subtle.digest`를 쓴다(브라우저·Node 양쪽에서 동작). Node의 `crypto` 모듈을 import 하지 마라 — 이 코드는 브라우저에서도 돈다.
 
-한계를 주석으로 남긴다: 거래가 한 건 추가된 재발행 명세서는 다른 fingerprint가 되어 중복으로 잡히지 않는다. MVP에서 감수하는 사항이다.
+### 3. 확신도 버킷 (`bucket.ts`)
 
-### 4. 잠금 판정 (`locks.ts`)
+`bucketByClassification`은 분류된 거래를 화면 단위로 나눈다.
 
-```ts
-export function applyLocks(periods: PeriodSummary[], plan: Plan): PeriodView[]
-```
+- `confidence`가 `CONFIDENCE_THRESHOLD`(0.7) 미만이면 **`classification` 값과 무관하게 `review` 버킷**에 넣는다
+- `classification`이 `null`인 건은 `unclassified` 버킷 (표본 모드에서 분류되지 않고 남은 건)
+- `isUserEdited`가 `true`면 사용자가 이미 확정한 것이므로 `confidence`와 무관하게 `review`에 넣지 않는다
+- `businessTotalKrw` / `personalTotalKrw`는 각 버킷의 정수 합. **`review`와 `unclassified`는 어느 쪽에도 더하지 않는다**
 
-- `plan === 'pro'` → 전부 그대로 통과
-- `plan === 'free'` → 가장 최신 `period`와 그 직전 1개월까지만 통과. 그보다 오래된 기간은 `LockedPeriod`로 **치환**한다
+마지막 규칙이 중요한 이유: 확인이 안 끝난 금액을 경비 합계에 넣으면 사용자가 그 숫자를 신고에 쓴다. 미확정은 미확정으로 보여야 한다.
 
-`LockedPeriod`는 `{ locked: true, period, teaser }`만 담는다. `teaser`는 금액이 들어가지 않은 문구여야 한다(예: `"지출이 늘었습니다"`). **금액·카테고리·가맹점을 절대 넣지 마라.** 이유: 이 객체가 그대로 네트워크로 나가므로, 값이 들어 있으면 잠금이 무의미해진다.
+### 4. 표본 선택 (`pickSample`)
+
+익명 프리뷰에서 AI로 보낼 거래를 고른다. **금액 절대값 내림차순 상위 `size`건.**
+
+이유: 20건으로 "AI가 제대로 가르는가"를 판단시켜야 하는데, 무작위로 고르면 편의점 결제만 나올 수 있다. 금액이 큰 건이 판단 가치가 높다.
+
+동점이면 `occurredOn` 내림차순으로 안정 정렬한다. 이유: 같은 입력에 같은 표본이 나와야 테스트가 고정된다.
 
 ### 테스트
 
-- 2개월치가 섞인 입력이 두 `PeriodSummary`로 분리되는지
-- 환불(음수)이 합계에서 차감되는지
-- `byCategory` 합이 `totalKrw`와 일치하는지
-- 같은 입력의 fingerprint가 동일하고, 한 행만 바꾸면 달라지는지
-- `free`에서 오래된 기간이 `LockedPeriod`가 되고 **금액 필드가 없는지**
-- `pro`에서는 잠기지 않는지
+- 음수(환불) 행이 섞인 합계
+- 정수 유지 — 소수점이 개입하지 않는지
+- 같은 행을 순서만 바꿔 넣었을 때 fingerprint가 동일한가
+- 한 행만 금액이 달라도 fingerprint가 달라지는가
+- `confidence: 0.6`인 `business` 건이 `review`로 가는가
+- `isUserEdited: true`이고 `confidence: 0.5`인 건이 `review`로 가지 **않는가**
+- `review`·`unclassified` 금액이 `businessTotalKrw`에 포함되지 **않는가**
+- `pickSample`이 금액 상위순이며 같은 입력에 같은 출력인가
 
 ## Acceptance Criteria
 
@@ -95,20 +88,21 @@ npx vitest run src/lib/analysis
 
 1. 위 AC 커맨드를 실행한다.
 2. 아키텍처 체크리스트:
-   - `grep -rn "parseFloat" src/lib/analysis/` 결과가 비어 있는가?
-   - `LockedPeriod`를 만드는 코드가 금액을 담지 않는가?
-   - Node `crypto`를 import하지 않았는가? (브라우저에서 깨진다)
-   - I/O·네트워크·DB 접근이 없는가?
+   - `grep -rn "parseFloat\|Math.round\|toFixed" src/lib/analysis/` — 금액 경로에 부동소수점이 없는가?
+   - `grep -rn "from 'crypto'\|require('crypto')" src/lib/analysis/` 가 비어 있는가?
+   - Anthropic·Supabase 호출이 없는 순수 함수인가?
+   - `CONFIDENCE_THRESHOLD`를 `src/types/tier.ts`에서 import 하는가? (하드코딩 금지)
 3. 결과에 따라 `phases/0-mvp/index.json`의 step 4를 업데이트한다:
-   - 성공 → `"status": "completed"`, `"summary"`에 공개 함수 4개와 잠금 규칙을 한 줄로
+   - 성공 → `"status": "completed"`, `"summary"`에 공개 함수 4개와 fingerprint 정의를 한 줄로
    - 실패 → `"status": "error"` + `"error_message"`
    - 사용자 개입 필요 → `"status": "blocked"` + `"blocked_reason"` 후 중단
 
 ## 금지사항
 
-- `LockedPeriod`에 금액·카테고리·가맹점·인사이트를 넣지 마라. 이유: 그대로 네트워크로 나가므로 잠금이 무력화된다.
-- Node `crypto` 모듈을 쓰지 마라. 이유: 이 코드는 브라우저에서도 실행된다. Web Crypto를 쓴다.
-- 부동소수점으로 금액을 누적하지 마라. 이유: 합계에 오차가 쌓인다.
-- DB 조회나 fetch를 넣지 마라. 이유: 순수 함수여야 픽스처만으로 테스트가 완결된다.
-- 집계 결과를 저장하는 코드를 쓰지 마라. 이유: 저장은 step7의 범위다.
+- 사업경비/개인지출을 판단하는 로직을 만들지 마라. 이유: 분류는 AI가 한다(step10·11). 여기서 규칙으로 흉내 내면 두 개의 진실이 생긴다.
+- 부동소수점 연산을 쓰지 마라. 이유: 통화 합계에 오차가 쌓이고, 이 제품에서 금액 오차는 치명적이다.
+- Node `crypto` 모듈을 import 하지 마라. 이유: 이 코드는 브라우저에서도 실행된다. `crypto.subtle`을 쓴다.
+- `review`·`unclassified` 금액을 경비 합계에 더하지 마라. 이유: 사용자가 미확정 금액을 신고에 쓰게 된다.
+- 가맹점명의 지점 표기를 제거해 병합하지 마라. 이유: 되돌릴 수 없고, 지점별로 성격이 다를 수 있다.
+- DB·네트워크에 접근하지 마라. 이유: 순수 함수여야 브라우저·서버 양쪽에서 같은 코드가 돈다.
 - 기존 테스트를 깨뜨리지 마라.

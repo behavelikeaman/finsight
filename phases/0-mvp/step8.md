@@ -1,84 +1,65 @@
-# Step 8: identity-account
+# Step 8: analyze-api
 
 ## 읽어야 할 파일
 
-- `/CLAUDE.md` — 인증 규칙
-- `/docs/ARCHITECTURE.md` — "인증 — 두 개의 진입 경로"
-- `/docs/ADR.md` — ADR-012, ADR-013
-- `/src/lib/supabase/auth.ts`, `/src/lib/supabase/session.ts`, `/src/middleware.ts` (step6 산출물 — `decideAuthRoute`를 반드시 읽어라)
-- `/src/types/api.ts` (step1 — `OkResponse`)
+- `/CLAUDE.md` — 보안·데이터흐름 규칙
+- `/docs/ARCHITECTURE.md` — API 계약과 분석 파이프라인 1단계
+- `/docs/ADR.md` — ADR-006(브라우저 전처리), ADR-014(3단계 분리)
+- `/src/types/api.ts`, `/src/types/analysis.ts`, `/src/types/tier.ts` (step1 — `AnalyzeRequest`, `AnalyzeResponse`, `MAX_ROWS`)
+- `/src/lib/analysis/index.ts` (step4 — `summarize`, `computeFingerprint`)
+- `/src/lib/supabase/server.ts`, `/src/lib/supabase/session.ts` (step6·7)
 
 ## 작업
 
-Google 계정 연결 플로우와 데이터 삭제를 구현한다. UI는 step9·11에서 붙이고, 여기서는 **동작하는 함수와 라우트**를 만든다.
+`src/app/api/analyze/route.ts`에 `POST /api/analyze`를 구현한다. 파이프라인 1단계(집계)를 배선하는 step이다.
 
-### 1. 두 경로 (`src/lib/supabase/identity.ts`)
+**TDD 가드 주의**: `route.ts`는 테스트 선행 대상이다. `src/app/api/analyze/route.test.ts`를 **먼저** 작성하라.
 
-step6의 `decideAuthRoute`가 고른 경로를 실제로 수행한다.
+### 처리 순서
 
-```ts
-/** 익명 세션의 결과를 유지한 채 Google을 연결한다. uid가 그대로 남는다. */
-export async function linkGoogle(redirectTo: string): Promise<{ error?: LinkError }>
-
-/** 기존 계정으로 진입한다. 재방문자 경로. */
-export async function signInGoogle(redirectTo: string): Promise<void>
-
-export type LinkError = 'already_linked' | 'identity_taken' | 'unknown'
+```
+1. requireUser()            — 미인증이면 401
+2. 본문 파싱 + 검증          — rows 배열, 각 필드 타입, MAX_ROWS 상한
+3. computeFingerprint(rows)
+4. 중복 조회                 — (owner_id, fingerprint)로 기존 analyses 검색
+   └ 있으면: 저장하지 않고 { ok:false, reason:'duplicate', existingId } 반환
+5. summarize(rows)          — 서버가 직접 계산
+6. 저장                      — analyses 1행 + transactions N행 (한 트랜잭션처럼)
+                              classification·account_code·confidence 는 전부 null
+7. { ok:true, analysisId, summary } 반환
 ```
 
-- `linkGoogle` → `supabase.auth.linkIdentity({ provider: 'google', options: { redirectTo } })`
-- `signInGoogle` → `supabase.auth.signInWithOAuth({ provider: 'google', options: { redirectTo } })`
+**6번에서 `classification`을 채우지 마라.** 이 엔드포인트는 분류하지 않는다. 분류는 step11의 `/api/analyses/:id/classify`가 한다.
 
-> **익명 세션에 결과가 있을 때 `signInWithOAuth()`를 부르면 새 계정이 만들어져 uid가 버려지고 사용자가 분석을 잃는다.** 호출 전에 반드시 `decideAuthRoute`로 분기하라. 두 함수를 직접 호출하는 코드는 이 파일 밖에 두지 마라.
+### 검증 규칙
 
-### 2. 실패 처리
+- `rows`가 배열이 아니거나 비어 있으면 400
+- 행 수가 `MAX_ROWS`(10,000) 초과면 400. 조용히 자르지 마라
+- 각 행: `occurredOn`이 `YYYY-MM-DD` 형태, `merchant`가 비어 있지 않은 문자열, `amountKrw`가 **정수**. 하나라도 아니면 400
+- 본문 크기 상한도 확인한다
 
-`linkIdentity`가 실패해도 **현재 익명 세션과 그 결과는 그대로 남아야 한다.** 세션을 정리하거나 로그아웃시키지 마라.
+**클라이언트가 보낸 집계·총액을 받지 마라.** 요청은 `rows`·`cardLabel`·`sourceKind`뿐이다. 이유: 클라이언트 계산을 신뢰하면 화면에 뜬 금액이 서버 기록과 달라진다.
 
-이미 다른 계정에 연결된 Google이면 `identity_taken`을 반환하고, UI는 이렇게 안내한다:
+### `owner_id`
 
-> "이미 사용 중인 Google 계정입니다. 로그인 후 이 파일을 다시 올려 주세요."
+`transactions`와 `analyses`의 `owner_id`는 **서버가 `auth.uid()`에서 채운다.** 요청 본문에서 읽지 마라. 이유: 남의 `owner_id`로 삽입하려는 시도를 애초에 차단한다(RLS `WITH CHECK`가 2차 방어).
 
-기존 계정과의 **병합은 구현하지 않는다.** MVP 범위 밖이다.
+### 저장
 
-### 3. OAuth 콜백 (`src/app/auth/callback/route.ts`)
-
-`code`를 세션으로 교환하고 원래 위치로 돌려보낸다.
-
-```ts
-// GET /auth/callback?code=...&next=/dashboard
-// exchangeCodeForSession(code) → redirect(next ?? '/dashboard')
-// 실패 시 에러 쿼리를 달아 프리뷰로 돌려보낸다. 결과를 잃지 않게.
-```
-
-`next` 파라미터는 **같은 오리진의 경로만** 허용한다. 외부 URL을 그대로 리다이렉트하지 마라. 이유: 오픈 리다이렉트 취약점이 된다.
-
-**TDD 가드 주의**: `route.ts`는 테스트 선행 대상이다.
-
-### 4. 데이터 삭제 (`src/app/api/account/route.ts`)
-
-```ts
-// DELETE /api/account → OkResponse
-```
-
-처리: `requireUser()` → 해당 사용자의 `analyses` 삭제(`transactions`·`insights`는 `ON DELETE CASCADE`로 따라간다) → `profiles` 초기화 또는 삭제 → `signOut()`.
-
-**`auth.users`를 삭제하지 마라.** 이유: admin API가 필요한데 service role 사용을 웹훅 한 곳으로 제한했다. 계정 자체 삭제는 다음 phase다.
-
-따라서 이 기능의 사용자 표기는 **"내 데이터 전체 삭제"** 다. 라우트 주석과 이후 UI 문구 모두 그렇게 쓴다.
-
-> **UI에 "계정 삭제"라고 쓰지 마라.** 이유: 계정은 남는데 사용자가 사라졌다고 믿으면 그 자체가 신뢰 문제다. 금융 데이터에서는 특히 그렇다.
+`analyses` 1행을 만들고 그 id로 `transactions`를 일괄 삽입한다. 삽입 도중 실패하면 `analyses` 행도 남기지 마라 — 고아 분석이 생긴다. Supabase RPC(`plpgsql` 함수)로 묶거나, 실패 시 명시적으로 `analyses`를 삭제한다.
 
 ### 테스트
 
-Supabase 클라이언트를 모킹한다. 실제 OAuth를 수행하지 마라.
+Supabase 클라이언트와 `session.ts`를 모킹한다. 실제 DB에 접속하지 마라.
 
-- `decideAuthRoute`가 `'link'`일 때 `linkIdentity`가, `'signin'`일 때 `signInWithOAuth`가 호출되는지
-- `linkIdentity` 실패 시 `signOut`이 **호출되지 않는지** (결과 보존)
-- `identity_taken` 매핑
-- 콜백이 외부 URL `next`를 거부하는지
-- `DELETE /api/account`가 미인증에서 401이고, 정상 시 `analyses` 삭제와 `signOut`을 호출하는지
-- `DELETE /api/account`가 `auth.admin.deleteUser`를 **호출하지 않는지**
+- 미인증 → 401
+- 10,001행 → 400
+- `amountKrw`가 소수 → 400
+- `merchant`가 빈 문자열 → 400
+- 정상 요청 → `ok:true`, `summary` 반환, `owner_id`가 세션 uid로 채워졌는지
+- 저장된 `transactions`의 `classification`이 전부 `null`인지
+- 중복 fingerprint → 저장 호출이 **일어나지 않고** `ok:false, reason:'duplicate'` 반환
+- 요청 본문에 `owner_id`를 넣어도 무시되는지
 
 ## Acceptance Criteria
 
@@ -86,29 +67,31 @@ Supabase 클라이언트를 모킹한다. 실제 OAuth를 수행하지 마라.
 npm run lint
 npm run build
 npm run test
-npx vitest run src/lib/supabase src/app/auth src/app/api/account
+npx vitest run src/app/api/analyze
 ```
 
 ## 검증 절차
 
 1. 위 AC 커맨드를 실행한다.
 2. 아키텍처 체크리스트:
-   - `grep -rn "linkIdentity\|signInWithOAuth" src/` 가 `src/lib/supabase/identity.ts`에만 나오는가?
-   - `grep -rn "admin.deleteUser" src/` 가 비어 있는가?
-   - `grep -rn "계정 삭제" src/` 가 비어 있는가?
-   - 콜백이 `next`를 같은 오리진으로 제한하는가?
+   - `grep -n "FormData\|new File(" src/app/api/analyze/route.ts` 가 비어 있는가?
+   - LLM 호출이 없는가? (`grep -rn "anthropic" src/app/api/analyze/`)
+   - `owner_id`를 요청 본문에서 읽지 않는가?
+   - 응답에 `ok` 판별자가 있는가?
+   - `MAX_ROWS`를 `src/types/tier.ts`에서 import 하는가? (하드코딩 금지)
 3. 결과에 따라 `phases/0-mvp/index.json`의 step 8을 업데이트한다:
-   - 성공 → `"status": "completed"`, `"summary"`에 `linkGoogle`/`signInGoogle`/콜백/삭제 라우트 경로를 한 줄로
+   - 성공 → `"status": "completed"`, `"summary"`에 엔드포인트·검증 규칙·중복 처리 방식을 한 줄로
    - 실패 → `"status": "error"` + `"error_message"`
    - 사용자 개입 필요 → `"status": "blocked"` + `"blocked_reason"` 후 중단
 
 ## 금지사항
 
-- 익명 세션에 결과가 있는데 `signInWithOAuth()`를 부르지 마라. 이유: 새 계정이 생겨 uid가 버려지고 사용자가 분석을 잃는다.
-- 연결 실패 시 로그아웃하거나 세션을 정리하지 마라. 이유: 사용자가 방금 만든 결과를 잃는다.
-- 기존 Google 계정과의 병합을 구현하지 마라. 이유: MVP 범위 밖이며, 잘못 만들면 데이터가 섞인다.
-- `auth.admin.deleteUser`를 쓰지 마라. 이유: service role 사용을 웹훅 한 곳으로 제한했다.
-- UI 문구나 주석에 "계정 삭제"라고 쓰지 마라. 이유: 실제로는 데이터만 지워지므로 사용자를 오해시킨다.
-- 콜백의 `next`를 검증 없이 리다이렉트하지 마라. 이유: 오픈 리다이렉트 취약점이 된다.
-- 랜딩·대시보드 UI를 만들지 마라. 이유: step9·11의 범위다.
+- 원본 파일을 받지 마라. `FormData`·`File`·`Blob`을 쓰지 마라. 이유: 본문 크기 제한에 걸리고, 카드번호와 원본이 서버에 도달한다. 정규화된 배열만 받는다.
+- **LLM을 호출하지 마라.** 이유: 익명 사용자도 이 엔드포인트를 쓴다. 분류는 step11에서 쿼터 검사를 거쳐 실행한다.
+- `classification`·`account_code`·`confidence`를 채우지 마라. 이유: 이 단계는 분류하지 않는다. 값이 있으면 UI가 분류가 끝난 줄 안다.
+- 클라이언트가 보낸 집계·총액을 신뢰하지 마라. 이유: 화면 금액과 서버 기록이 어긋난다.
+- `owner_id`를 요청 본문에서 읽지 마라. 이유: 남의 데이터로 삽입할 통로가 된다.
+- 상한 초과 시 조용히 잘라내지 마라. 이유: 사용자가 일부만 분석된 줄 모른다.
+- 중복일 때 저장하고 나서 알리지 마라. 이유: 이중 계상이 발생해 시계열이 망가진다. 저장 전에 판정한다.
+- service role 클라이언트를 쓰지 마라. 이유: 이 경로는 사용자 세션으로 RLS 아래서 동작해야 한다.
 - 기존 테스트를 깨뜨리지 마라.
