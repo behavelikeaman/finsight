@@ -421,7 +421,21 @@ class StepExecutor:
         print(f"{'='*60}")
 
 
+def _force_utf8_streams():
+    """stdout/stderr를 UTF-8로 고정한다.
+
+    한국어 Windows에서 출력을 파일로 리다이렉트하면 스트림 인코딩이 cp949가
+    된다. 그 상태로 진행 표시(✓ ↻ ⏸)를 print하면 UnicodeEncodeError로 죽는다.
+    PYTHONUTF8 환경변수에 의존하지 않도록 코드에서 직접 고정한다.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
+
+
 def main():
+    _force_utf8_streams()
     parser = argparse.ArgumentParser(description="Harness Step Executor")
     parser.add_argument("phase_dir", help="Phase directory name (e.g. 0-mvp)")
     parser.add_argument("--push", action="store_true", help="Push branch after completion")
