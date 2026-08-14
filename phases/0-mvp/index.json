@@ -11,7 +11,9 @@
     {
       "step": 1,
       "name": "core-types",
-      "status": "pending"
+      "status": "completed",
+      "started_at": "2026-08-14T16:09:54+0900",
+      "summary": "src/types/{domain,analysis,tier,api,db,index}.ts 생성. domain: SourceKind·Tier·RawTable·ColumnMapping·NormalizedRow·IdentifiedRow·RedactedRow(브랜디드)·Classification·AccountCode(12종). analysis: AnalysisSummary·PeriodTotal·MerchantTotal·ClassifiedTransaction·ClassifiedView. tier: CONFIDENCE_THRESHOLD·MAX_ROWS·SAMPLE_SIZE·QUOTA 단일 출처. api: Analyze/Classify/Corrections/Chat/Billing 계약(ok 판별자). db: Profile·Analysis·Transaction·UserRule·UsageCounter 행 타입. lint/build/test/tsc 모두 통과."
     },
     {
       "step": 2,
@@ -98,5 +100,6 @@
       "name": "deploy-config",
       "status": "pending"
     }
-  ]
+  ],
+  "created_at": "2026-08-14T16:09:54+0900"
 }
