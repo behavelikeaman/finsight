@@ -1,7 +1,7 @@
 # 프로젝트: FinSight
 
 카드 명세서(CSV/엑셀)를 올리면 AI가 거래별로 **사업경비/개인지출**을 갈라주는, 한국 프리랜서·1인 사업자용 SaaS.
-기획은 `docs/PRD.md`, 구조는 `docs/ARCHITECTURE.md`, 결정 배경은 `docs/ADR.md`를 참조할 것.
+기획은 `docs/PRD.md`, 구조는 `docs/ARCHITECTURE.md`, 결정 배경은 `docs/ADR.md`, 디자인은 `docs/DESIGN.md`(토큰·컴포넌트 원본은 `docs/design-system/`)를 참조할 것.
 
 ## 기술 스택
 - Next.js 16 (App Router) / React 19 — `next lint`는 없다. ESLint flat config(`eslint.config.mjs`) 사용
