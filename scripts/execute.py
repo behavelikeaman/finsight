@@ -29,6 +29,18 @@ def progress_indicator(label: str):
     stop = threading.Event()
     t0 = time.monotonic()
 
+    # 로그 파일로 리다이렉트된 경우(분리 실행) 애니메이션을 끈다.
+    # 초당 8프레임이 그대로 쌓이면 로그를 사람이 읽을 수 없다.
+    if not sys.stderr.isatty():
+        sys.stderr.write(f"{label}\n")
+        sys.stderr.flush()
+        info = types.SimpleNamespace(elapsed=0.0)
+        try:
+            yield info
+        finally:
+            info.elapsed = time.monotonic() - t0
+        return
+
     def _animate():
         idx = 0
         while not stop.wait(0.12):

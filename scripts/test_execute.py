@@ -507,6 +507,33 @@ class TestProgressIndicator:
             time.sleep(0.2)
         assert pi.elapsed > 0
 
+    def test_no_animation_when_stderr_is_not_a_tty(self):
+        """로그 파일로 리다이렉트하면 프레임이 초당 8줄씩 쌓여 로그를 못 읽는다."""
+        import io, time
+        buf = io.StringIO()
+        buf.isatty = lambda: False
+
+        with patch.object(ex.sys, "stderr", buf):
+            with ex.progress_indicator("작업중") as pi:
+                time.sleep(0.4)
+
+        out = buf.getvalue()
+        assert "작업중" in out
+        assert "\r" not in out
+        assert out.count("\n") == 1
+        assert pi.elapsed > 0
+
+    def test_animates_when_stderr_is_a_tty(self):
+        import io, time
+        buf = io.StringIO()
+        buf.isatty = lambda: True
+
+        with patch.object(ex.sys, "stderr", buf):
+            with ex.progress_indicator("작업중"):
+                time.sleep(0.4)
+
+        assert "\r" in buf.getvalue()
+
 
 # ---------------------------------------------------------------------------
 # main() CLI 파싱 (mocked)
