@@ -235,8 +235,12 @@ class StepExecutor:
             sys.exit(1)
 
         prompt = preamble + step_file.read_text(encoding="utf-8")
+        # 프롬프트는 argv가 아니라 stdin으로 넘긴다.
+        # Windows의 argv 상한은 32767자인데 가드레일(CLAUDE.md + docs/*.md)만
+        # 50KB가 넘어서, argv로 넘기면 WinError 206으로 즉사한다.
         result = subprocess.run(
-            ["claude", "-p", "--dangerously-skip-permissions", "--output-format", "json", prompt],
+            ["claude", "-p", "--dangerously-skip-permissions", "--output-format", "json"],
+            input=prompt,
             cwd=self._root, capture_output=True, text=True, timeout=1800,
             encoding="utf-8", errors="replace",
         )

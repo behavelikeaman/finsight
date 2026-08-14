@@ -439,8 +439,26 @@ class TestInvokeClaude:
         assert "-p" in cmd
         assert "--dangerously-skip-permissions" in cmd
         assert "--output-format" in cmd
-        assert "PREAMBLE" in cmd[-1]
-        assert "UI를 구현하세요" in cmd[-1]
+
+        # 프롬프트는 argv가 아니라 stdin으로 넘어간다.
+        # Windows argv 상한이 32767자인데 가드레일(CLAUDE.md+docs)만 50KB가 넘는다.
+        prompt = mock_run.call_args[1]["input"]
+        assert "PREAMBLE" in prompt
+        assert "UI를 구현하세요" in prompt
+        assert not any("PREAMBLE" in str(a) for a in cmd)
+
+    def test_prompt_not_passed_as_argv(self, executor):
+        """가드레일이 커지면 argv 상한(32767)을 넘겨 WinError 206으로 죽는다."""
+        mock_result = MagicMock(returncode=0, stdout="{}", stderr="")
+        step = {"step": 2, "name": "ui"}
+        big_preamble = "X" * 40000
+
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            executor._invoke_claude(step, big_preamble)
+
+        cmd = mock_run.call_args[0][0]
+        assert sum(len(a) for a in cmd) < 32767
+        assert len(mock_run.call_args[1]["input"]) > 40000
 
     def test_saves_output_json(self, executor):
         mock_result = MagicMock(returncode=0, stdout='{"ok": true}', stderr="")
