@@ -15,6 +15,10 @@ if [ -z "$FILE_PATH" ]; then
   exit 0
 fi
 
+# Windows 경로(백슬래시)를 슬래시로 정규화한다.
+# 정규화하지 않으면 아래 */layout.tsx 같은 면제 패턴이 전부 매칭에 실패한다.
+FILE_PATH=${FILE_PATH//\\//}
+
 # 테스트 파일 자체를 수정하는 건 허용
 case "$FILE_PATH" in
   *test*|*spec*|*.test.*|*.spec.*|*__tests__*)
