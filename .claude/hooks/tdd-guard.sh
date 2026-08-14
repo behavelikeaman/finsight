@@ -29,6 +29,13 @@ case "$FILE_PATH" in
     ;;
 esac
 
+# docs/ 는 참조 자산·문서 — 구현 코드가 아니므로 허용
+case "$FILE_PATH" in
+  */docs/*|*\\docs\\*)
+    exit 0
+    ;;
+esac
+
 # types/ 폴더는 테스트 불필요 — 허용
 case "$FILE_PATH" in
   */types/*|*/types.ts|*/types.d.ts)
