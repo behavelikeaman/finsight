@@ -1,0 +1,48 @@
+@import "tailwindcss";
+
+/* 라이트모드 고정. 다크모드 분기를 만들지 않는다.
+   색상은 전부 아래 토큰으로만 정의한다 — 컴포넌트에 hex를 하드코딩하지 마라. */
+@theme {
+  --font-sans: "Inter", -apple-system, system-ui, "Segoe UI", Roboto, Helvetica,
+    Arial, sans-serif;
+  --font-mono: "JetBrains Mono", "Geist Mono", ui-monospace, monospace;
+
+  /* 무채색 배경 계열 */
+  --color-canvas: #ffffff;
+  --color-surface-soft: #f7f7f7;
+  --color-surface-strong: #eef0f3;
+
+  /* 경계선 */
+  --color-hairline: #dee1e6;
+  --color-hairline-soft: #eef0f3;
+
+  /* 텍스트 */
+  --color-ink: #0a0b0d;
+  --color-body: #5b616e;
+  --color-muted: #7c828a;
+  --color-muted-soft: #a8acb3;
+  --color-on-primary: #ffffff;
+
+  /* 포인트 컬러 1가지 */
+  --color-primary: #0052ff;
+  --color-primary-active: #003ecc;
+  --color-primary-disabled: #a8b8cc;
+
+  /* 분류 상태 3색. 색은 분류 상태에만 쓴다. */
+  --color-business: #05b169;
+  --color-business-soft: #e6f7f0;
+  --color-personal: #7c828a;
+  --color-personal-soft: #f0f1f3;
+  --color-review: #f4b000;
+  --color-review-soft: #fdf4e0;
+}
+
+html {
+  color-scheme: light;
+}
+
+body {
+  background-color: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+}
