@@ -507,6 +507,71 @@ class TestProgressIndicator:
             time.sleep(0.2)
         assert pi.elapsed > 0
 
+    def test_no_animation_when_stderr_is_not_a_tty(self):
+        """로그 파일로 리다이렉트하면 프레임이 초당 8줄씩 쌓여 로그를 못 읽는다."""
+        import io, time
+        buf = io.StringIO()
+        buf.isatty = lambda: False
+
+        with patch.object(ex.sys, "stderr", buf):
+            with ex.progress_indicator("작업중") as pi:
+                time.sleep(0.4)
+
+        out = buf.getvalue()
+        assert "작업중" in out
+        assert "\r" not in out
+        assert out.count("\n") == 1
+        assert pi.elapsed > 0
+
+    def test_animates_when_stderr_is_a_tty(self):
+        import io, time
+        buf = io.StringIO()
+        buf.isatty = lambda: True
+
+        with patch.object(ex.sys, "stderr", buf):
+            with ex.progress_indicator("작업중"):
+                time.sleep(0.4)
+
+        assert "\r" in buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# 출력 스트림 인코딩
+# ---------------------------------------------------------------------------
+
+class TestForceUtf8Streams:
+    class _Stream:
+        def __init__(self):
+            self.kwargs = None
+
+        def reconfigure(self, **kw):
+            self.kwargs = kw
+
+    def test_reconfigures_stdout_and_stderr(self):
+        out, err = self._Stream(), self._Stream()
+        with patch.object(ex.sys, "stdout", out), patch.object(ex.sys, "stderr", err):
+            ex._force_utf8_streams()
+        assert out.kwargs["encoding"] == "utf-8"
+        assert err.kwargs["encoding"] == "utf-8"
+
+    def test_tolerates_stream_without_reconfigure(self):
+        """pytest capture처럼 reconfigure가 없는 스트림에서도 죽지 않아야 한다."""
+        class Bare:
+            pass
+
+        with patch.object(ex.sys, "stdout", Bare()), patch.object(ex.sys, "stderr", Bare()):
+            ex._force_utf8_streams()  # 예외가 나면 실패
+
+    def test_main_forces_utf8_before_running(self):
+        """리다이렉트된 stdout(cp949)에 ✓를 print하면 UnicodeEncodeError로 죽는다."""
+        called = []
+        with patch.object(ex, "_force_utf8_streams", lambda: called.append(True)), \
+             patch.object(ex.StepExecutor, "run", lambda self: None), \
+             patch.object(ex.sys, "argv", ["execute.py", "0-mvp"]), \
+             patch.object(ex.StepExecutor, "__init__", lambda self, *a, **k: None):
+            ex.main()
+        assert called == [True]
+
 
 # ---------------------------------------------------------------------------
 # main() CLI 파싱 (mocked)

@@ -10,6 +10,11 @@ tsconfig.tsbuildinfo
 .env*
 !.env.example
 
+# 하네스 실행 로그.
+# execute.py가 매 step에서 `git add -A`를 하므로 무시하지 않으면 로그가 커밋된다.
+harness.log
+harness.err
+
 # 하네스 스크립트(pytest) 실행 부산물
 __pycache__/
 .pytest_cache/
