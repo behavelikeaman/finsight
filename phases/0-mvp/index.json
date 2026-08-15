@@ -22,7 +22,7 @@
       "status": "completed",
       "started_at": "2026-08-15T18:28:11+0900",
       "summary": "src/lib/ingest/ 생성 — ingestFile(buffer, fileName, {maxRows?}): Promise<IngestResult{table,skippedPreambleRows,droppedTotalRows}> · detectSourceKind(fileName): SourceKind · decodeText(buffer)(UTF-8 BOM→fatal UTF-8→EUC-KR 폴백) · parseCsv(text)(따옴표·필드 내 쉼표/줄바꿈/\"\" 이스케이프 직접 구현) · parseXlsx(buffer)(ExcelJS 동적 import, 첫 시트, 날짜→YYYY-MM-DD) · findHeaderRow/dropTotalRows(안내문·합계 행 제거). 상한은 tier.ts의 MAX_ROWS를 import해 초과 시 throw(잘라내지 않음). __fixtures__ 8종(UTF-8·EUC-KR·안내문·합계·안내문+합계·따옴표·xlsx·빈 파일/0건, 바이너리는 테스트에서 생성) + 테스트 49개. lint/build/test 통과.",
-      "completed_at": "2026-08-15T18:36:40+0900"
+      "completed_at": "2026-08-15T18:36:28+0900"
     },
     {
       "step": 3,
