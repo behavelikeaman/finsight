@@ -66,6 +66,7 @@ class StepExecutor:
     """Phase 디렉토리 안의 step들을 순차 실행하는 하네스."""
 
     MAX_RETRIES = 3
+    CLAUDE_TIMEOUT = 14400  # 4시간. product-ui급 대형 step은 1800s(30분)로는 부족했다.
     FEAT_MSG = "feat({phase}): step {num} — {name}"
     CHORE_MSG = "chore({phase}): step {num} output"
     TZ = timezone(timedelta(hours=9))
@@ -120,7 +121,10 @@ class StepExecutor:
 
     def _run_git(self, *args) -> subprocess.CompletedProcess:
         cmd = ["git"] + list(args)
-        return subprocess.run(cmd, cwd=self._root, capture_output=True, text=True)
+        return subprocess.run(
+            cmd, cwd=self._root, capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+        )
 
     def _checkout_branch(self):
         branch = f"feat-{self._phase_name}"
@@ -250,12 +254,26 @@ class StepExecutor:
         # 프롬프트는 argv가 아니라 stdin으로 넘긴다.
         # Windows의 argv 상한은 32767자인데 가드레일(CLAUDE.md + docs/*.md)만
         # 50KB가 넘어서, argv로 넘기면 WinError 206으로 즉사한다.
-        result = subprocess.run(
-            ["claude", "-p", "--dangerously-skip-permissions", "--output-format", "json"],
-            input=prompt,
-            cwd=self._root, capture_output=True, text=True, timeout=1800,
-            encoding="utf-8", errors="replace",
-        )
+        try:
+            result = subprocess.run(
+                ["claude", "-p", "--dangerously-skip-permissions", "--output-format", "json"],
+                input=prompt,
+                cwd=self._root, capture_output=True, text=True, timeout=self.CLAUDE_TIMEOUT,
+                encoding="utf-8", errors="replace",
+            )
+        except subprocess.TimeoutExpired as e:
+            # 타임아웃을 그대로 올리면 재시도 로직을 못 타고 프로세스 전체가 죽는다.
+            # 호출부가 index.json 상태로 성패를 판단하므로, 실패로 보이게 결과만 반환한다.
+            print(f"\n  WARN: Claude 호출이 시간 초과됨 ({self.CLAUDE_TIMEOUT}s)")
+            output = {
+                "step": step_num, "name": step_name,
+                "exitCode": -1,
+                "stdout": e.stdout or "", "stderr": (e.stderr or "") + f"\n[timeout after {self.CLAUDE_TIMEOUT}s]",
+            }
+            out_path = self._phase_dir / f"step{step_num}-output.json"
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(output, f, indent=2, ensure_ascii=False)
+            return output
 
         if result.returncode != 0:
             print(f"\n  WARN: Claude가 비정상 종료됨 (code {result.returncode})")

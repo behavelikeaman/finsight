@@ -480,14 +480,27 @@ class TestInvokeClaude:
             executor._invoke_claude(step, "preamble")
         assert exc_info.value.code == 1
 
-    def test_timeout_is_1800(self, executor):
+    def test_timeout_matches_configured_constant(self, executor):
         mock_result = MagicMock(returncode=0, stdout="{}", stderr="")
         step = {"step": 2, "name": "ui"}
 
         with patch("subprocess.run", return_value=mock_result) as mock_run:
             executor._invoke_claude(step, "preamble")
 
-        assert mock_run.call_args[1]["timeout"] == 1800
+        assert mock_run.call_args[1]["timeout"] == ex.StepExecutor.CLAUDE_TIMEOUT
+
+    def test_timeout_expired_does_not_raise(self, executor, tmp_path):
+        step = {"step": 2, "name": "ui"}
+        err = subprocess.TimeoutExpired(cmd="claude", timeout=ex.StepExecutor.CLAUDE_TIMEOUT,
+                                         output="partial stdout", stderr="partial stderr")
+
+        with patch("subprocess.run", side_effect=err):
+            output = executor._invoke_claude(step, "preamble")
+
+        assert output["exitCode"] == -1
+        assert "partial stdout" in output["stdout"]
+        out_path = executor._phase_dir / "step2-output.json"
+        assert out_path.exists()
 
 
 # ---------------------------------------------------------------------------
