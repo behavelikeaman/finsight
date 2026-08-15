@@ -51,7 +51,10 @@
     {
       "step": 6,
       "name": "product-ui",
-      "status": "pending"
+      "status": "completed",
+      "started_at": "2026-08-16T04:17:58+0900",
+      "summary": "A: src/lib/supabase/identity.ts(linkGoogle·signInGoogle, LinkError), src/app/auth/callback/route.ts(code교환+same-origin next검증), src/app/api/account/route.ts(DELETE, analyses·user_rules만 삭제+signOut, profiles·usage_counters·auth.users 미접근), src/app/api/analyses/[id]/route.ts(DELETE, 소유확인 404). B: src/app/api/analyses/[id]/transactions/route.ts(PATCH, edits[].id 소속검증, confidence:null, saveAsRule시 derivePattern 기준 (owner_id,merchant_pattern) upsert). C: src/app/api/analyses/[id]/chat/route.ts(POST, checkQuota→tier_required/quota_exceeded 구분→askAboutLedger→성공시만 consumeQuota, order by 고정). D: src/app/(marketing)/page.tsx(Server Component, QUOTA·SAMPLE_SIZE 기반 요금제), src/components/upload/{DropZone,MappingPanel,UploadFlow}.tsx(드롭시점 ensureSession, guessMapping/normalizeRows 재사용, 원본파일 미전송), src/components/preview/PreviewPanel.tsx(classify sample 호출 후 브라우저 Supabase 직접조회로 표본 렌더, 잔여건 비블러 안내), src/components/auth/ConnectPanel.tsx(decideAuthRoute 분기). E: src/app/(app)/dashboard/{page.tsx,[id]/page.tsx}(force-dynamic, 직접 DB조회, bucketByClassification 재사용, 사업경비 합계에 review·unclassified 미포함), src/components/dashboard/{TransactionTable,MonthlyChart,ClassifyFullButton,ChatPanel(Pro만 렌더),ExportButton(Pro만 렌더),DeleteDataButton,accountCodeLabels}.tsx(낙관적 PATCH+규칙저장 confirm, 인쇄 CSS). 테스트 41개 추가(전체 307개), lint/build/test 모두 통과.",
+      "completed_at": "2026-08-16T07:22:00+0900"
     },
     {
       "step": 7,

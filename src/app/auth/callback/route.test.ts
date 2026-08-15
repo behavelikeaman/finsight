@@ -1,0 +1,85 @@
+import { NextRequest } from "next/server";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const mocks = vi.hoisted(() => ({
+  exchangeCodeForSession: vi.fn(),
+  createServerSupabase: vi.fn(),
+}));
+
+vi.mock("@/lib/supabase/server", () => ({
+  createServerSupabase: mocks.createServerSupabase,
+}));
+
+import { GET } from "./route";
+
+function request(query: string): NextRequest {
+  return new NextRequest(`http://localhost/auth/callback${query}`);
+}
+
+beforeEach(() => {
+  mocks.exchangeCodeForSession.mockReset();
+  mocks.createServerSupabase.mockResolvedValue({
+    auth: { exchangeCodeForSession: mocks.exchangeCodeForSession },
+  });
+});
+
+describe("GET /auth/callback", () => {
+  it("code를 세션으로 교환하고 next로 리다이렉트한다", async () => {
+    mocks.exchangeCodeForSession.mockResolvedValue({ error: null });
+
+    const res = await GET(request("?code=abc123&next=/analyses/analysis-1"));
+
+    expect(mocks.exchangeCodeForSession).toHaveBeenCalledWith("abc123");
+    expect(res.status).toBe(307);
+    expect(res.headers.get("location")).toBe(
+      "http://localhost/analyses/analysis-1",
+    );
+  });
+
+  it("next가 없으면 /dashboard로 보낸다", async () => {
+    mocks.exchangeCodeForSession.mockResolvedValue({ error: null });
+
+    const res = await GET(request("?code=abc123"));
+
+    expect(res.headers.get("location")).toBe("http://localhost/dashboard");
+  });
+
+  it("next가 외부 URL이면 거부하고 기본 경로로 보낸다", async () => {
+    mocks.exchangeCodeForSession.mockResolvedValue({ error: null });
+
+    const res = await GET(
+      request("?code=abc123&next=https://evil.com/steal"),
+    );
+
+    expect(res.headers.get("location")).toBe("http://localhost/dashboard");
+  });
+
+  it("next가 프로토콜 상대 URL(//)이면 거부한다", async () => {
+    mocks.exchangeCodeForSession.mockResolvedValue({ error: null });
+
+    const res = await GET(request("?code=abc123&next=//evil.com"));
+
+    expect(res.headers.get("location")).toBe("http://localhost/dashboard");
+  });
+
+  it("code가 없으면 에러 쿼리를 달아 next로 되돌린다", async () => {
+    const res = await GET(request("?next=/analyses/analysis-1"));
+
+    expect(mocks.exchangeCodeForSession).not.toHaveBeenCalled();
+    const location = new URL(res.headers.get("location") ?? "");
+    expect(location.pathname).toBe("/analyses/analysis-1");
+    expect(location.searchParams.get("auth_error")).toBeTruthy();
+  });
+
+  it("교환이 실패하면 에러 쿼리를 달아 next로 되돌린다 — 결과를 잃지 않는다", async () => {
+    mocks.exchangeCodeForSession.mockResolvedValue({
+      error: { message: "invalid code" },
+    });
+
+    const res = await GET(request("?code=bad&next=/analyses/analysis-1"));
+
+    const location = new URL(res.headers.get("location") ?? "");
+    expect(location.pathname).toBe("/analyses/analysis-1");
+    expect(location.searchParams.get("auth_error")).toBeTruthy();
+  });
+});

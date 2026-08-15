@@ -46,3 +46,15 @@ body {
   color: var(--color-ink);
   font-family: var(--font-sans);
 }
+
+/* 인쇄 — 세무 대리인에게 넘기는 종이가 실제 산출물이다.
+   헤더·고지 바·툴바를 숨기고, 확인필요 행 배경을 흰색으로 되돌린다. */
+@media print {
+  .no-print {
+    display: none !important;
+  }
+
+  .review-row {
+    background-color: var(--color-canvas) !important;
+  }
+}
