@@ -46,7 +46,7 @@
       "status": "completed",
       "started_at": "2026-08-16T03:56:07+0900",
       "summary": "src/lib/rules.ts(applyRules 부분문자열·최長패턴우선, derivePattern)와 quota.ts(checkQuota/consumeQuota→increment_usage RPC, checkSampleAllowance/markSampleUsed→mark_sample_used RPC, QUOTA는 tier.ts 단일출처) — 두 관문. src/services/anthropic/{client,prompt,classify,chat}.ts — getClient(호출시점 키), buildPromptBlocks(RedactedRow만 허용, system+ledger 두 cache_control ephemeral 블록 공유), classifyTransactions(tool use 강제, id로 응답 매핑, confidence<0.7→review 강등, 미지 accountCode→other), askAboutLedger(동일 프리픽스 재사용). src/app/api/analyze/route.ts — 세션 사용자 owner_id 채움, MAX_ROWS·본문크기 검증, fingerprint 중복판정, summarize 재집계, LLM 미호출. src/app/api/analyses/[id]/classify/route.ts — 소유확인(404)→mode 서버재판정(익명+full 거부)→관문(sample/quota)→classification IS NULL 대상 조회→applyRules 선적용→classifyTransactions(unmatched만)→id기준 저장→consumeQuota/markSampleUsed. 테스트 92개 추가(전체 266개), lint/build/test 모두 통과.",
-      "completed_at": "2026-08-16T04:20:00+0900"
+      "completed_at": "2026-08-16T04:17:58+0900"
     },
     {
       "step": 6,
