@@ -19,6 +19,11 @@ interface TransactionTableProps {
   /** 사업경비 표에서만 켠다 — 계정과목별로 묶어 소계를 보여준다. */
   groupByAccountCode?: boolean;
   emptyMessage?: string;
+  /**
+   * 표의 접근 이름. 한 화면에 표가 여러 개라 화면 낭독기 사용자는 이것 없이는
+   * 어느 표를 읽고 있는지 알 수 없다. 시각적으로는 섹션 제목과 중복이라 숨긴다.
+   */
+  caption: string;
 }
 
 const CLASSIFICATION_LABEL: Record<Classification, string> = {
@@ -27,11 +32,20 @@ const CLASSIFICATION_LABEL: Record<Classification, string> = {
   review: "확인 필요",
 };
 
+/**
+ * 표 안 폼 컨트롤의 단일 규격. 분류·계정과목 셀렉트가 같은 반경·높이·테두리를
+ * 쓴다. 키보드만으로 표 전체를 수정할 수 있어야 하므로 포커스 링을 명시한다.
+ */
+const CONTROL_CLASS =
+  "rounded-md border border-muted-soft bg-canvas px-2 py-1 text-xs text-ink " +
+  "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-primary";
+
 export function TransactionTable({
   analysisId,
   rows,
   groupByAccountCode = false,
   emptyMessage = "표시할 거래가 없습니다.",
+  caption,
 }: TransactionTableProps) {
   const [prevRows, setPrevRows] = useState(rows);
   const [localRows, setLocalRows] = useState(rows);
@@ -112,19 +126,43 @@ export function TransactionTable({
 
   return (
     <div className="flex flex-col gap-2">
-      {toast && (
-        <p className="rounded-md bg-surface-strong px-4 py-2 text-sm text-ink">{toast}</p>
-      )}
+      {/* 규칙 학습·저장 실패는 화면에만 뜨면 낭독기 사용자에게 전달되지 않는다.
+          role="status"는 진행 중인 작업을 끊지 않고 알린다. */}
+      <p
+        role="status"
+        aria-live="polite"
+        className={
+          toast ? "rounded-md bg-surface-strong px-4 py-2 text-sm text-ink" : "sr-only"
+        }
+      >
+        {toast}
+      </p>
       <table className="w-full border-collapse text-sm">
+        <caption className="sr-only">{caption}</caption>
         <thead>
           <tr className="border-b border-hairline text-left text-muted">
-            <th className="px-3 py-2 font-medium">날짜</th>
-            <th className="px-3 py-2 font-medium">가맹점</th>
-            <th className="px-3 py-2 text-right font-medium">금액</th>
-            <th className="px-3 py-2 font-medium">분류</th>
-            <th className="px-3 py-2 font-medium">계정과목</th>
-            <th className="px-3 py-2 font-medium">확신도</th>
-            <th className="px-3 py-2 font-medium">출처</th>
+            <th scope="col" className="px-3 py-2 font-medium">
+              날짜
+            </th>
+            <th scope="col" className="px-3 py-2 font-medium">
+              가맹점
+            </th>
+            <th scope="col" className="px-3 py-2 text-right font-medium">
+              금액
+            </th>
+            <th scope="col" className="px-3 py-2 font-medium">
+              분류
+            </th>
+            <th scope="col" className="px-3 py-2 font-medium">
+              계정과목
+            </th>
+            {/* 값이 우측 정렬된 숫자라 헤더도 맞춘다. 어긋나면 열이 깨져 보인다. */}
+            <th scope="col" className="px-3 py-2 text-right font-medium">
+              확신도
+            </th>
+            <th scope="col" className="px-3 py-2 font-medium">
+              출처
+            </th>
           </tr>
         </thead>
         <tbody>
@@ -164,12 +202,19 @@ function RowGroup({
     <>
       {group.code !== null && group.total !== null && (
         <tr className="bg-surface-soft">
-          <td colSpan={6} className="px-3 py-1.5 text-xs font-medium text-muted">
+          <th
+            scope="rowgroup"
+            colSpan={2}
+            className="px-3 py-1.5 text-left text-xs font-medium text-muted"
+          >
             {ACCOUNT_CODE_LABEL[group.code]}
-          </td>
+          </th>
+          {/* 소계는 금액 열(3번째) 아래에 둔다. 표 끝으로 밀면 어느 열의 합계인지
+              읽히지 않는다. */}
           <td className="px-3 py-1.5 text-right font-mono text-xs font-medium tabular-nums text-muted">
             {group.total.toLocaleString("ko-KR")}원
           </td>
+          <td colSpan={4} />
         </tr>
       )}
       {group.rows.map((tx) => (
@@ -201,12 +246,15 @@ function TxRow({
         {tx.amountKrw.toLocaleString("ko-KR")}원
       </td>
       <td className="px-3 py-2">
+        {/* 열 헤더만으로는 낭독기가 어느 거래의 셀렉트인지 알 수 없다.
+            테두리는 컴포넌트를 식별하는 요소라 3:1을 지키는 muted-soft를 쓴다. */}
         <select
+          aria-label={`${tx.merchant} 분류`}
           value={tx.classification ?? ""}
           onChange={(e) =>
             onChange(tx.id, e.target.value as Classification, tx.accountCode)
           }
-          className="rounded-md border border-hairline bg-canvas px-2 py-1 text-xs text-ink"
+          className={CONTROL_CLASS}
         >
           <option value="" disabled>
             미분류
@@ -218,6 +266,7 @@ function TxRow({
       </td>
       <td className="px-3 py-2">
         <select
+          aria-label={`${tx.merchant} 계정과목`}
           value={tx.accountCode ?? ""}
           disabled={tx.classification !== "business"}
           onChange={(e) =>
@@ -227,7 +276,7 @@ function TxRow({
               (e.target.value || null) as AccountCode | null,
             )
           }
-          className="rounded-md border border-hairline bg-canvas px-2 py-1 text-xs text-ink disabled:cursor-not-allowed disabled:opacity-50"
+          className={`${CONTROL_CLASS} disabled:cursor-not-allowed disabled:opacity-50`}
         >
           <option value="">-</option>
           {ACCOUNT_CODES.map((code) => (
@@ -237,7 +286,7 @@ function TxRow({
           ))}
         </select>
       </td>
-      <td className="px-3 py-2 font-mono tabular-nums text-muted">
+      <td className="px-3 py-2 text-right font-mono tabular-nums text-muted">
         {tx.confidence === null ? "-" : `${Math.round(tx.confidence * 100)}%`}
       </td>
       <td className="px-3 py-2 text-xs text-muted">{sourceLabel(tx)}</td>

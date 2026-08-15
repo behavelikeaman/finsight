@@ -96,39 +96,51 @@ export default async function AnalysisDetailPage({
   );
 
   return (
-    <main className="mx-auto flex max-w-[1200px] flex-col gap-8 px-6 py-10">
+    <main className="mx-auto flex max-w-[1200px] flex-col gap-10 px-6 py-10">
       <p className="no-print rounded-md bg-surface-soft px-4 py-3 text-xs text-muted">
         이 결과는 세무 조언이 아닙니다. 최종 판단은 세무 대리인과 상의하세요.
       </p>
 
-      <div>
+      {/* 제목과 요약 수치는 같은 대상을 설명한다. 붙여 두고 다른 섹션과는 떼어 놓는다. */}
+      <header className="flex flex-col gap-4">
         <h1 className="text-2xl font-normal text-ink">
           {analysisRow.card_label ?? "명세서"}
         </h1>
-      </div>
 
-      <section className="grid grid-cols-1 gap-4 sm:grid-cols-4">
-        <SummaryCard label="총액" value={`${totalKrw.toLocaleString("ko-KR")}원`} />
-        <SummaryCard
-          label="사업경비 합계"
-          value={`${view.businessTotalKrw.toLocaleString("ko-KR")}원`}
-        />
-        <SummaryCard
-          label="개인지출 합계"
-          value={`${view.personalTotalKrw.toLocaleString("ko-KR")}원`}
-        />
-        <SummaryCard label="미확정 건수" value={`${unresolvedCount}건`} />
-      </section>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-4">
+          <SummaryCard label="총액" value={`${totalKrw.toLocaleString("ko-KR")}원`} />
+          <SummaryCard
+            label="사업경비 합계"
+            value={`${view.businessTotalKrw.toLocaleString("ko-KR")}원`}
+          />
+          <SummaryCard
+            label="개인지출 합계"
+            value={`${view.personalTotalKrw.toLocaleString("ko-KR")}원`}
+          />
+          <SummaryCard label="미확정 건수" value={`${unresolvedCount}건`} />
+        </div>
 
-      <div className="no-print flex flex-wrap items-center gap-3">
-        {needsFullClassify && <ClassifyFullButton analysisId={analysisId} />}
-        {tier === "pro" && <ExportButton rows={transactions} />}
-      </div>
+        <div className="no-print flex flex-wrap items-center gap-3">
+          {needsFullClassify && <ClassifyFullButton analysisId={analysisId} />}
+          {tier === "pro" && <ExportButton rows={transactions} />}
+        </div>
+      </header>
 
+      {/* 이 화면의 주인공. 제목을 한 단계 키우고 남은 건수를 옆에 붙여 위계를
+          만든다. 상자로 감싸지 않는다 — 확인 필요 행은 이미 노란 배경을 갖고
+          있어 섹션까지 칠하면 색이 중복되고, 색은 분류 상태에만 쓴다. */}
       <section className="flex flex-col gap-3">
-        <h2 className="text-lg font-normal text-ink">확인 필요</h2>
+        <h2 className="flex items-baseline gap-2 text-xl font-normal text-ink">
+          확인 필요
+          {unresolvedCount > 0 && (
+            <span className="font-mono text-sm font-medium tabular-nums text-muted">
+              {unresolvedCount}건
+            </span>
+          )}
+        </h2>
         <TransactionTable
           analysisId={analysisId}
+          caption="확인이 필요한 거래"
           rows={[...view.review, ...view.unclassified]}
           emptyMessage="확인이 필요한 거래가 없습니다."
         />
@@ -138,6 +150,7 @@ export default async function AnalysisDetailPage({
         <h2 className="text-lg font-normal text-ink">사업경비</h2>
         <TransactionTable
           analysisId={analysisId}
+          caption="사업경비로 분류된 거래"
           rows={businessSorted}
           groupByAccountCode
           emptyMessage="사업경비로 분류된 거래가 없습니다."
@@ -148,6 +161,7 @@ export default async function AnalysisDetailPage({
         <h2 className="text-lg font-normal text-ink">개인지출</h2>
         <TransactionTable
           analysisId={analysisId}
+          caption="개인지출로 분류된 거래"
           rows={view.personal}
           emptyMessage="개인지출로 분류된 거래가 없습니다."
         />
@@ -162,7 +176,7 @@ export default async function AnalysisDetailPage({
       ) : (
         // 블러로 가리지 않는다. 서버가 Q&A 값을 보내지 않고, 화면은 그 빈자리를
         // 무엇이 잠겼는지로 명시한다.
-        <section className="no-print flex flex-col items-start gap-3 rounded-2xl border border-hairline bg-surface-soft p-6">
+        <section className="no-print flex flex-col items-start gap-3 rounded-lg border border-hairline bg-surface-soft p-6">
           <h2 className="text-lg font-normal text-ink">
             거래내역에 대해 물어보기는 Pro 기능입니다
           </h2>
@@ -185,7 +199,7 @@ export default async function AnalysisDetailPage({
 
 function SummaryCard({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-2xl border border-hairline bg-canvas p-4">
+    <div className="rounded-lg border border-hairline bg-canvas p-4">
       <p className="text-xs text-muted">{label}</p>
       <p className="mt-1 font-mono text-lg font-medium tabular-nums text-ink">
         {value}

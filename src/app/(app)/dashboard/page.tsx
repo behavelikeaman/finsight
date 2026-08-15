@@ -54,12 +54,21 @@ export default async function DashboardPage({
         </p>
       ) : (
         <table className="w-full border-collapse text-sm">
+          <caption className="sr-only">업로드한 명세서 목록</caption>
           <thead>
             <tr className="border-b border-hairline text-left text-muted">
-              <th className="px-3 py-2 font-medium">카드 라벨</th>
-              <th className="px-3 py-2 font-medium">업로드일</th>
-              <th className="px-3 py-2 text-right font-medium">행 수</th>
-              <th className="px-3 py-2 font-medium">분류 상태</th>
+              <th scope="col" className="px-3 py-2 font-medium">
+                카드 라벨
+              </th>
+              <th scope="col" className="px-3 py-2 font-medium">
+                업로드일
+              </th>
+              <th scope="col" className="px-3 py-2 text-right font-medium">
+                행 수
+              </th>
+              <th scope="col" className="px-3 py-2 font-medium">
+                분류 상태
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -81,7 +90,7 @@ export default async function DashboardPage({
                 </td>
                 <td className="px-3 py-2">
                   {analysis.classified_at ? (
-                    <span className="rounded-full bg-business-soft px-2.5 py-1 text-xs font-medium text-business">
+                    <span className="rounded-full bg-business-soft px-2.5 py-1 text-xs font-medium text-business-ink">
                       분류 완료
                     </span>
                   ) : (

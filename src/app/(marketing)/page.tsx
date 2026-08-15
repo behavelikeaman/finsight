@@ -19,27 +19,31 @@ const FEATURES = [
 export default function LandingPage() {
   return (
     <main className="mx-auto flex max-w-[1200px] flex-col gap-16 px-6 py-16 sm:py-24">
-      <section className="flex flex-col items-center gap-6 text-center">
-        <span className="rounded-full bg-surface-strong px-4 py-1.5 text-xs font-medium tracking-wide text-ink uppercase">
-          프리랜서·1인 사업자용
-        </span>
-        <h1 className="max-w-2xl text-3xl font-normal text-ink sm:text-4xl">
-          신고철마다 카드 명세서를 열어 사업경비를 손으로 골라내셨나요
-        </h1>
-        <p className="max-w-xl text-base text-body">
-          카드 명세서를 올리면 AI가 거래별로 사업경비와 개인지출을 갈라드립니다.
-          로그인 없이 먼저 결과부터 확인해 보세요.
-        </p>
-      </section>
+      {/* 이 페이지의 주인공은 히어로 문구가 아니라 드롭존이다. 문구는 드롭존을
+          설명하는 말이므로 한 덩어리로 붙이고, 아래 조연 섹션과는 떼어 놓는다. */}
+      <div className="flex flex-col gap-8">
+        <section className="flex flex-col items-center gap-6 text-center">
+          <span className="rounded-full bg-surface-strong px-4 py-1.5 text-xs font-medium tracking-wide text-ink uppercase">
+            프리랜서·1인 사업자용
+          </span>
+          <h1 className="max-w-2xl text-3xl font-normal text-ink sm:text-4xl">
+            신고철마다 카드 명세서를 열어 사업경비를 손으로 골라내셨나요
+          </h1>
+          <p className="max-w-xl text-base text-body">
+            카드 명세서를 올리면 AI가 거래별로 사업경비와 개인지출을 갈라드립니다.
+            로그인 없이 먼저 결과부터 확인해 보세요.
+          </p>
+        </section>
 
-      <section className="flex flex-col gap-4">
-        <UploadFlow />
-        <div className="flex flex-col gap-1 text-xs text-muted">
-          <p>원본 파일은 서버로 전송되지 않습니다. 브라우저에서 처리한 거래내역만 전송됩니다.</p>
-          <p>거래내역(가맹점·금액·날짜)은 분류 분석을 위해 국외(Anthropic)로 전송됩니다.</p>
-          <p>카드번호는 어떤 경우에도 저장하지 않습니다.</p>
-        </div>
-      </section>
+        <section className="flex flex-col gap-4">
+          <UploadFlow />
+          <div className="flex flex-col gap-1 text-xs text-muted">
+            <p>원본 파일은 서버로 전송되지 않습니다. 브라우저에서 처리한 거래내역만 전송됩니다.</p>
+            <p>거래내역(가맹점·금액·날짜)은 분류 분석을 위해 국외(Anthropic)로 전송됩니다.</p>
+            <p>카드번호는 어떤 경우에도 저장하지 않습니다.</p>
+          </div>
+        </section>
+      </div>
 
       <section className="grid grid-cols-1 gap-6 sm:grid-cols-3">
         {FEATURES.map((feature) => (

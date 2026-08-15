@@ -15,7 +15,7 @@ export function MonthlyChart({ data }: { data: MonthlyDatum[] }) {
   if (data.length === 0) return null;
 
   return (
-    <div className="rounded-2xl border border-hairline bg-canvas p-4">
+    <div className="rounded-lg border border-hairline bg-canvas p-4">
       <p className="mb-3 text-xs font-medium text-muted">월별 사업경비 · 개인지출</p>
       <div className="h-64 w-full">
         <ResponsiveContainer width="100%" height="100%">

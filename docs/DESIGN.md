@@ -28,14 +28,28 @@
 | `--color-hairline-soft` `#eef0f3` | `--color-hairline-soft` | 표 행 구분선 |
 | `--color-ink` `#0a0b0d` | `--color-ink` | 본문 강조·제목 |
 | `--color-body` `#5b616e` | `--color-body` | 본문 |
-| `--color-muted` `#7c828a` | `--color-muted` | 보조 설명 |
-| `--color-muted-soft` `#a8acb3` | `--color-muted-soft` | 확신도·플레이스홀더 |
+| `--color-muted` `#7c828a` | `--color-muted` **`#686e76`** | 보조 설명 — 접근성 때문에 값을 바꿨다(아래) |
+| `--color-muted-soft` `#a8acb3` | `--color-muted-soft` **`#8b9199`** | 비텍스트 보조 — 값과 용도를 바꿨다(아래) |
 | `--radius-sm/md/lg/xl/pill/full` | 동일 | `rounded-*` |
 | `--font-display/body/mono` | `--font-display/body/mono` | `font-*` |
 | `--text-*-size` 계열 | `--text-*` (+`--text-*--line-height`) | `text-*` |
 | `--shadow-soft` | `--shadow-soft` | `shadow-soft` |
 
 `--space-*`는 옮기지 않는다. Tailwind 기본 4px 스케일이 원본(`4·8·12·16·20·24·32·48`)과 이미 일치한다. 예외인 `--space-section`(96px)과 `--content-max-width`(1200px) 둘만 `--spacing-section`·`--container-content`로 올린다.
+
+### 회색 계열은 접근성 때문에 원본에서 벗어난다
+
+원본 팔레트의 회색 셋은 WCAG 2.1 AA를 통과하지 못한다. 마케팅 사이트 기준으로 고른 값이기 때문이다. 우리는 표에 숫자를 읽히는 실무 도구라 그대로 쓸 수 없다. 원칙은 `uxguide.md`의 접근성 절에 있다.
+
+| 토큰 | 원본 | 현재 | 이유 |
+|---|---|---|---|
+| `--color-muted` | `#7c828a` (3.88:1) | `#686e76` | 표 헤더·확신도·고지 문구에 쓰이는 **정보성 텍스트**다. 4.5:1이 필요하다. 현재 canvas 5.15 / surface-soft 4.80 / review-soft 4.70 |
+| `--color-muted-soft` | `#a8acb3` (2.28:1) | `#8b9199` | 텍스트로 쓰지 않는다. **폼 컨트롤 테두리와 차트 축선** 전용이며 비텍스트 기준 3:1을 지킨다(3.18) |
+| `--color-business-ink` | 없음 | `#056b3f` | 채우기용 `--color-business` `#05b169`는 연한 배경 위에서 2.52:1이라 **글자로 쓸 수 없다.** 배지 텍스트는 이 토큰을 쓴다(5.95:1) |
+
+`--color-hairline` `#dee1e6`은 1.31:1이지만 그대로 둔다. 카드 테두리와 표 구분선은 **장식**이라 WCAG 1.4.11의 대상이 아니다. 다만 폼 컨트롤 테두리는 컴포넌트를 식별하는 요소라 대상이 되므로, `select`·`input`에는 `hairline`을 쓰지 말고 `muted-soft`를 쓴다.
+
+값을 바꿀 때는 눈으로 판단하지 말고 대비율을 계산해서 확인한다.
 
 ### 시맨틱 컬러는 재정의한다
 

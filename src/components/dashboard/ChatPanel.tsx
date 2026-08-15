@@ -58,7 +58,7 @@ export function ChatPanel({ analysisId }: { analysisId: string }) {
   };
 
   return (
-    <div className="flex flex-col gap-3 rounded-2xl border border-hairline bg-canvas p-6">
+    <div className="flex flex-col gap-3 rounded-lg border border-hairline bg-canvas p-6">
       <h2 className="text-lg font-normal text-ink">거래내역에 대해 물어보세요</h2>
       <p className="text-xs text-muted">
         대화 이력은 저장되지 않습니다. 페이지를 벗어나면 사라집니다.
