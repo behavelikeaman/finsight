@@ -1,1 +1,46 @@
 Step 5/7 (5 done): ai-pipeline
+Exception in thread Thread-13 (_readerthread):
+Traceback (most recent call last):
+  File "C:\Users\thkim\AppData\Local\Programs\Python\Python312\Lib\threading.py", line 1075, in _bootstrap_inner
+    self.run()
+  File "C:\Users\thkim\AppData\Local\Programs\Python\Python312\Lib\threading.py", line 1012, in run
+    self._target(*self._args, **self._kwargs)
+  File "C:\Users\thkim\AppData\Local\Programs\Python\Python312\Lib\subprocess.py", line 1599, in _readerthread
+    buffer.append(fh.read())
+                  ^^^^^^^^^
+UnicodeDecodeError: 'cp949' codec can't decode byte 0xe2 in position 41: illegal multibyte sequence
+Step 6/7 (6 done): product-ui
+
+============================================================
+  Harness Step Executor
+  Phase: 0-mvp | Steps: 8
+============================================================
+  Commit: feat(0-mvp): step 5 — ai-pipeline
+  ✓ Step 5: ai-pipeline [0s]
+Traceback (most recent call last):
+  File "C:\Projects\Projects\finsight\scripts\execute.py", line 448, in <module>
+    main()
+  File "C:\Projects\Projects\finsight\scripts\execute.py", line 444, in main
+    StepExecutor(args.phase_dir, auto_push=args.push).run()
+  File "C:\Projects\Projects\finsight\scripts\execute.py", line 101, in run
+    self._execute_all_steps(guardrails)
+  File "C:\Projects\Projects\finsight\scripts\execute.py", line 396, in _execute_all_steps
+    self._execute_single_step(pending, guardrails)
+  File "C:\Projects\Projects\finsight\scripts\execute.py", line 326, in _execute_single_step
+    self._invoke_claude(step, preamble)
+  File "C:\Projects\Projects\finsight\scripts\execute.py", line 253, in _invoke_claude
+    result = subprocess.run(
+             ^^^^^^^^^^^^^^^
+  File "C:\Users\thkim\AppData\Local\Programs\Python\Python312\Lib\subprocess.py", line 550, in run
+    stdout, stderr = process.communicate(input, timeout=timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\thkim\AppData\Local\Programs\Python\Python312\Lib\subprocess.py", line 1228, in communicate
+    sts = self.wait(timeout=self._remaining_time(endtime))
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\thkim\AppData\Local\Programs\Python\Python312\Lib\subprocess.py", line 1264, in wait
+    return self._wait(timeout=timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\thkim\AppData\Local\Programs\Python\Python312\Lib\subprocess.py", line 1593, in _wait
+    raise TimeoutExpired(self.args, timeout)
+subprocess.TimeoutExpired: Command '['claude', '-p', '--dangerously-skip-permissions', '--output-format', 'json']' timed out after -9246.703000000009 seconds
+EXIT_CODE=1
