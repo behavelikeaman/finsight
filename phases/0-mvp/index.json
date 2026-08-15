@@ -27,27 +27,30 @@
     {
       "step": 3,
       "name": "core-lib",
-      "status": "pending"
+      "status": "completed",
+      "started_at": "2026-08-15T18:51:22+0900",
+      "summary": "src/lib/{mapping,analysis}/ + redact.ts 생성(전부 I/O 없는 순수 함수). mapping: guessMapping(headers, rows?)(별칭 사전 + 원화·청구 우선, 카드번호 컬럼 제외, 값 패턴 폴백)·validateMapping(missing/unparsable, 상위 20행 실패율 50% 초과)·normalizeRows(행 단위 skip, 최빈 연도 fallback, 날짜·가맹점·금액 3필드만)·parseAmountKrw(₩/천단위/원/음수/괄호/소수부, parseFloat 미사용)·parseDate(6포맷). analysis: summarize(정수 누적, YYYY-MM 오름차순, 상위 10 가맹점, 지점 표기 보존)·computeFingerprint(정렬 후 sha256, crypto.subtle이라 Promise<string>)·bucketByClassification(CONFIDENCE_THRESHOLD import, isUserEdited 예외, review·unclassified는 합계 제외)·pickSample(금액 절대값 내림차순, id 보존). redact.ts: redactMerchant/redactRows — [RRN]·[PHONE]·[CARD]·[ACCT]·[NAME] 토큰 치환, removedCount 집계, RedactedRow 캐스팅 단일 지점, 이마트24·GS25 등 정상 상호 보존. 테스트 95개 추가(전체 150개), lint/build/test 통과.",
+      "completed_at": "2026-08-15T19:02:40+0900"
     },
     {
       "step": 4,
       "name": "data-and-auth",
-      "status": "pending"
+      "status": "hold"
     },
     {
       "step": 5,
       "name": "ai-pipeline",
-      "status": "pending"
+      "status": "hold"
     },
     {
       "step": 6,
       "name": "product-ui",
-      "status": "pending"
+      "status": "hold"
     },
     {
       "step": 7,
       "name": "billing-and-deploy",
-      "status": "pending"
+      "status": "hold"
     }
   ],
   "created_at": "2026-08-14T16:09:54+0900",
