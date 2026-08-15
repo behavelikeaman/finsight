@@ -1,1 +1,9 @@
 Step 7/7 (7 done): billing-and-deploy
+
+============================================================
+  Harness Step Executor
+  Phase: 0-mvp | Steps: 8
+============================================================
+  ⏸ Step 7: billing-and-deploy blocked [0s]
+    Reason: 외부 서비스 수동 설정 필요 — DEPLOY.md 참조. Supabase 프로젝트 생성/마이그레이션 적용/Anonymous Sign-Ins·Manual Linking·Google OAuth 활성화, Anthropic 키 발급, Polar 상품·웹훅 등록, 호스팅 환경변수 등록.
+EXIT_CODE=2
