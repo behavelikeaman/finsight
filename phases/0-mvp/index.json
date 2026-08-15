@@ -38,7 +38,7 @@
       "status": "completed",
       "started_at": "2026-08-15T19:06:49+0900",
       "summary": "supabase/migrations/0001_initial.sql — 테이블 5개(profiles·analyses·user_rules·transactions·usage_counters, amount_krw bigint, account_code 12종 check, unique(owner_id,fingerprint)·(owner_id,merchant_pattern), 인덱스 3개) + auth.users INSERT 트리거(handle_new_user → profiles tier='free') + security definer 함수 3개(effective_tier(uid)·increment_usage(kind)(uid·period 인자 없음, auth.uid()+서버시각)·mark_sample_used()) + RLS 5개 테이블 차등(analyses·transactions·user_rules 전체 CRUD with check, profiles SELECT+제한 UPDATE와 tier·current_period_end·sample_used·polar_* revoke, usage_counters SELECT 정책만 + insert/update/delete revoke). 래퍼 src/lib/supabase/{browser,server,admin}.ts(admin은 웹훅 전용 주석 + serverEnv 호출시점 읽기). 인증 src/lib/supabase/auth.ts(decideAuthRoute·ensureSession·isAnonymousUser)와 session.ts(getCurrentUser·requireUser·getEffectiveTier RPC·UnauthorizedError), src/middleware.ts(getUser로 세션 갱신 + 응답에 쿠키 재심기, 익명 로그인 없음). 테스트 39개 추가(전체 189개), lint/build/test 통과.",
-      "completed_at": "2026-08-15T19:14:00+0900"
+      "completed_at": "2026-08-15T19:13:01+0900"
     },
     {
       "step": 5,
