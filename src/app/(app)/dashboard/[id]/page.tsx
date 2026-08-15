@@ -5,7 +5,9 @@ import { createServerSupabase } from "@/lib/supabase/server";
 import { getCurrentUser, getEffectiveTier } from "@/lib/supabase/session";
 import type { ClassifiedTransaction } from "@/types/analysis";
 import type { AccountCode, Classification } from "@/types/domain";
+import { QUOTA } from "@/types/tier";
 
+import { UpgradeButton } from "@/components/billing/UpgradeButton";
 import { ChatPanel } from "@/components/dashboard/ChatPanel";
 import { ClassifyFullButton } from "@/components/dashboard/ClassifyFullButton";
 import { DeleteDataButton } from "@/components/dashboard/DeleteDataButton";
@@ -153,10 +155,24 @@ export default async function AnalysisDetailPage({
 
       <MonthlyChart data={monthlyData} />
 
-      {tier === "pro" && (
+      {tier === "pro" ? (
         <div className="no-print">
           <ChatPanel analysisId={analysisId} />
         </div>
+      ) : (
+        // 블러로 가리지 않는다. 서버가 Q&A 값을 보내지 않고, 화면은 그 빈자리를
+        // 무엇이 잠겼는지로 명시한다.
+        <section className="no-print flex flex-col items-start gap-3 rounded-2xl border border-hairline bg-surface-soft p-6">
+          <h2 className="text-lg font-normal text-ink">
+            거래내역에 대해 물어보기는 Pro 기능입니다
+          </h2>
+          <p className="text-sm text-body">
+            Pro로 업그레이드하면 월 {QUOTA.pro.chatPerMonth}건의 질문과 월{" "}
+            {QUOTA.pro.classifyPerMonth}회의 전건 분류, CSV 내보내기·인쇄를
+            사용할 수 있습니다.
+          </p>
+          <UpgradeButton />
+        </section>
       )}
 
       <section className="no-print flex flex-col gap-2 border-t border-hairline pt-6">

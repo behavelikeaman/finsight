@@ -1,6 +1,9 @@
 // 이 클라이언트는 RLS를 우회한다.
-// 유일한 사용처: src/app/api/webhooks/polar/route.ts 의 tier 갱신 (마지막 step)
-// 그 외 어디서도 import 하지 마라.
+// 사용처는 두 곳뿐이다 — 둘 다 Polar 구독 상태를 profiles에 반영하는 경로다:
+//   src/app/api/webhooks/polar/route.ts
+//   src/app/api/billing/sync/route.ts
+// 그 외 어디서도 import 하지 마라. 두 곳에서도 profiles의
+// tier·current_period_end·polar_* 외의 컬럼·테이블은 건드리지 않는다.
 import { createClient } from "@supabase/supabase-js";
 
 import { serverEnv } from "@/lib/env";
