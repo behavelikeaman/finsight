@@ -26,83 +26,28 @@
     },
     {
       "step": 3,
-      "name": "column-mapping",
-      "status": "hold"
+      "name": "core-lib",
+      "status": "pending"
     },
     {
       "step": 4,
-      "name": "analysis-engine",
-      "status": "hold"
+      "name": "data-and-auth",
+      "status": "pending"
     },
     {
       "step": 5,
-      "name": "redaction",
-      "status": "hold"
+      "name": "ai-pipeline",
+      "status": "pending"
     },
     {
       "step": 6,
-      "name": "supabase-schema",
-      "status": "hold"
+      "name": "product-ui",
+      "status": "pending"
     },
     {
       "step": 7,
-      "name": "auth-session",
-      "status": "hold"
-    },
-    {
-      "step": 8,
-      "name": "analyze-api",
-      "status": "hold"
-    },
-    {
-      "step": 9,
-      "name": "rules-and-quota",
-      "status": "hold"
-    },
-    {
-      "step": 10,
-      "name": "anthropic-service",
-      "status": "hold"
-    },
-    {
-      "step": 11,
-      "name": "classify-api",
-      "status": "hold"
-    },
-    {
-      "step": 12,
-      "name": "identity-account",
-      "status": "hold"
-    },
-    {
-      "step": 13,
-      "name": "landing-upload",
-      "status": "hold"
-    },
-    {
-      "step": 14,
-      "name": "corrections-api",
-      "status": "hold"
-    },
-    {
-      "step": 15,
-      "name": "dashboard-ui",
-      "status": "hold"
-    },
-    {
-      "step": 16,
-      "name": "chat-api",
-      "status": "hold"
-    },
-    {
-      "step": 17,
-      "name": "polar-billing",
-      "status": "hold"
-    },
-    {
-      "step": 18,
-      "name": "deploy-config",
-      "status": "hold"
+      "name": "billing-and-deploy",
+      "status": "pending"
     }
   ],
   "created_at": "2026-08-14T16:09:54+0900",

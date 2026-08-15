@@ -1,84 +1,222 @@
-# Step 4: analysis-engine
+# Step 4: data-and-auth
+
+DB 스키마와 인증 인프라를 만든다. 두 덩어리다: **A. Supabase 스키마·클라이언트 래퍼**, **B. 세션 미들웨어·인증 판정**.
+
+B는 A의 산출물(`effective_tier` 함수, `browser.ts`/`server.ts` 래퍼)에 의존한다. **반드시 A를 끝내고 `npx vitest run src/lib/supabase`가 통과한 뒤 B로 넘어가라.**
+
+**실제 Supabase 프로젝트에 접속하거나 마이그레이션을 적용하지 않는다.** 로컬 파일만 만들고, 테스트는 전부 모킹한다. 적용은 마지막 step에서 사용자가 한다. Supabase CLI를 설치할 필요도 없다.
 
 ## 읽어야 할 파일
 
-- `/CLAUDE.md` — 데이터 무결성 규칙
-- `/docs/ARCHITECTURE.md` — 데이터 모델의 fingerprint 정의
-- `/docs/ADR.md` — ADR-006(브라우저 전처리), ADR-011(확신도)
-- `/src/types/domain.ts`, `/src/types/analysis.ts`, `/src/types/tier.ts` (step1)
-- `/src/lib/mapping/index.ts` (step3 — 입력이 되는 `NormalizedRow`의 실제 형태)
+먼저 아래 파일들을 읽고 프로젝트의 아키텍처와 설계 의도를 파악하라:
 
-## 작업
+- `/CLAUDE.md` — 보안 규칙 전체, 인증 규칙
+- `/docs/ARCHITECTURE.md` — 데이터 모델과 RLS 절, "인증 — 두 개의 진입 경로" 절
+- `/docs/ADR.md` — ADR-004, ADR-016, ADR-018
+- `/src/types/db.ts`, `/src/types/domain.ts`, `/src/types/tier.ts` — 컬럼명·타입을 여기에 맞춘다
+- `/src/lib/env.ts` — 환경변수는 **호출 시점에** 읽는다
+- `/.env.example`
 
-`src/lib/analysis/`에 집계·중복판정·확신도 버킷팅을 구현한다. **전부 I/O 없는 순수 함수다.** 이 프로젝트의 모든 금액 계산은 여기서만 일어난다.
+이전 step에서 만들어진 코드를 꼼꼼히 읽고, 설계 의도를 이해한 뒤 작업하라.
 
-**여기서 경비 분류를 하지 않는다.** 사업경비/개인지출 판단은 AI가 한다(step10·11). 이 step은 숫자를 다루는 층이다.
+---
 
-### 공개 인터페이스 (`src/lib/analysis/index.ts`)
+# A. Supabase 스키마와 클라이언트 래퍼
+
+## A-1. `supabase/migrations/0001_initial.sql`
+
+### 테이블
+
+`docs/ARCHITECTURE.md`의 데이터 모델 절을 그대로 옮긴다.
+
+- `profiles` — `id uuid primary key references auth.users(id) on delete cascade`, `tier text not null default 'free' check (tier in ('free','pro'))`, `sample_used boolean not null default false`, `polar_customer_id text`, `polar_subscription_id text`, `current_period_end timestamptz`
+- `analyses` — `owner_id uuid not null references auth.users(id) on delete cascade`, `card_label text`, `fingerprint text not null`, `source_kind text not null check (source_kind in ('csv','xlsx'))`, `row_count int not null`, `classified_at timestamptz`, `created_at timestamptz not null default now()`
+- `transactions` — `analysis_id uuid not null references analyses(id) on delete cascade`, `owner_id uuid not null`, `occurred_on date not null`, `merchant text not null`, `amount_krw bigint not null`, `classification text check (classification in ('business','personal','review'))`, `account_code text`, `confidence real`, `is_user_edited boolean not null default false`, `rule_id uuid references user_rules(id) on delete set null`
+- `user_rules` — `owner_id uuid not null`, `merchant_pattern text not null`, `classification text not null`, `account_code text`, `created_at timestamptz not null default now()`
+- `usage_counters` — `owner_id uuid not null`, `period text not null` (`'YYYY-MM'`), `classify_used int not null default 0`, `chat_used int not null default 0`, primary key `(owner_id, period)`
+
+`transactions.rule_id`가 `user_rules`를 참조하므로 **`user_rules`를 `transactions`보다 먼저 생성한다.**
+
+**`amount_krw`는 `bigint`다.** `numeric`이나 `real`을 쓰지 마라. 이유: 원 단위 정수이며, 부동소수점 타입은 합계에 오차를 만든다.
+
+`account_code`에는 `src/types/domain.ts`의 `AccountCode` 12개 값을 `check` 제약으로 건다. 이유: 타입과 DB가 어긋나면 AI가 지어낸 계정과목이 그대로 저장된다.
+
+### 제약
+
+- `unique (owner_id, fingerprint)` on `analyses` — 중복 업로드 감지
+- `unique (owner_id, merchant_pattern)` on `user_rules` — 같은 가맹점에 규칙이 둘 생기지 않게. 재수정은 upsert
+- 조회용 인덱스: `transactions(analysis_id)`, `transactions(owner_id, occurred_on)`, `analyses(owner_id, created_at desc)`
+
+### `profiles` 자동 생성 트리거
+
+`auth.users`에 INSERT가 일어나면 `profiles` 행을 `tier='free'`로 만드는 트리거를 건다.
+
+이게 없으면 쿼터 판정이 null로 무너진다. 익명 사용자도 `auth.users`에 들어가므로 이 트리거를 타야 한다.
+
+### 함수 3개
+
+세 함수 모두 `security definer`, `search_path` 고정.
+
+```sql
+create or replace function public.effective_tier(uid uuid) returns text
+-- tier='pro' AND current_period_end > now() 이면 'pro', 아니면 'free'
+
+create or replace function public.increment_usage(kind text) returns int
+-- auth.uid()와 서버 시각 기준 'YYYY-MM'으로 usage_counters upsert,
+-- kind에 해당하는 컬럼을 원자적으로 +1 하고 갱신된 값을 반환한다.
+-- uid와 period를 인자로 받지 마라 — 호출자가 남의 것을 조작할 수 있다.
+
+create or replace function public.mark_sample_used() returns void
+-- auth.uid()의 profiles.sample_used 를 true 로 설정한다. 되돌리는 함수는 만들지 마라.
+```
+
+**`effective_tier` 판정은 여기 한 곳에만 존재한다.** 애플리케이션 코드에서 다시 구현하지 마라.
+
+`increment_usage`가 `uid`를 인자로 받지 않는 이유: 인자로 받으면 클라이언트가 남의 uid를 넣어 카운터를 소진시킬 수 있다. 함수 안에서 `auth.uid()`를 읽는다.
+
+### RLS
+
+5개 테이블 전부 `enable row level security`.
+
+**테이블마다 사용자에게 주는 권한이 다르다. 일괄로 걸지 마라.**
+
+| 테이블 | SELECT | INSERT | UPDATE | DELETE |
+|---|---|---|---|---|
+| `analyses` | O | O | O | O |
+| `transactions` | O | O | O | O |
+| `user_rules` | O | O | O | O |
+| `profiles` | O | X (트리거가 만든다) | 제한적 — 아래 참조 | X |
+| `usage_counters` | O | **X** | **X** | **X** |
+
+허용하는 곳에는 `using (owner_id = auth.uid())`와 **`with check (owner_id = auth.uid())`** 를 둘 다 건다. `profiles`는 `id = auth.uid()`가 기준이다.
+
+> SELECT 정책만 걸고 끝내지 마라. `with check`가 없으면 남의 `owner_id`로 INSERT가 통과한다.
+
+#### `usage_counters` — 사용자는 쓸 수 없다
+
+SELECT만 허용하고 INSERT·UPDATE·DELETE 정책을 **만들지 않는다.** 쓰기는 `increment_usage` 함수(security definer)만 한다.
+
+> 이게 없으면 사용자가 `update usage_counters set classify_used = 0`을 직접 실행해 **쿼터 관문 전체를 무력화한다.** 무료 사용자가 AI 분류를 무제한으로 쓰게 되며, 비용이 그대로 나간다. 이 프로젝트에서 가장 직접적인 비용 유출 경로다.
+
+DELETE도 막는 이유: 행을 지우면 카운터가 0부터 다시 시작한다. UPDATE를 막고 DELETE를 열어두면 같은 구멍이다.
+
+#### `profiles` — 사용자가 바꿀 수 없는 컬럼
+
+```sql
+revoke update (tier, current_period_end, sample_used,
+               polar_customer_id, polar_subscription_id)
+  on public.profiles from authenticated;
+```
+
+- `tier`·`current_period_end` — 사용자가 자기 행을 UPDATE해 Pro가 되면 결제가 무의미하다
+- `sample_used` — `false`로 되돌리면 익명 표본 분류를 무한히 쓴다
+- `polar_*` — 남의 구독 ID를 자기 행에 넣는 통로가 된다
+
+이 컬럼들의 갱신 주체는 웹훅·`billing/sync`(service role)와 `mark_sample_used` 함수뿐이다. service role은 `authenticated` 롤이 아니므로 이 revoke의 영향을 받지 않는다.
+
+## A-2. `src/lib/supabase/browser.ts`
+
+`createBrowserClient`(`@supabase/ssr`) 래퍼. `NEXT_PUBLIC_SUPABASE_URL`·`NEXT_PUBLIC_SUPABASE_ANON_KEY`만 쓴다.
+
+## A-3. `src/lib/supabase/server.ts`
+
+`createServerClient` 래퍼. Next 16의 `cookies()`를 사용한다. Server Component와 라우트 핸들러 양쪽에서 쓰인다.
+
+## A-4. `src/lib/supabase/admin.ts`
+
+service role 클라이언트. **파일 상단에 사용처를 못 박는 주석을 단다.**
 
 ```ts
-export function summarize(rows: NormalizedRow[]): AnalysisSummary
-export function computeFingerprint(rows: NormalizedRow[]): string
-export function bucketByClassification(txs: ClassifiedTransaction[]): ClassifiedView
-export function pickSample(rows: IdentifiedRow[], size: number): IdentifiedRow[]
+// 이 클라이언트는 RLS를 우회한다.
+// 유일한 사용처: src/app/api/webhooks/polar/route.ts 의 tier 갱신 (마지막 step)
+// 그 외 어디서도 import 하지 마라.
 ```
 
-**입력 타입이 함수마다 다른 것은 의도된 것이다.** `summarize`·`computeFingerprint`는 업로드 시점(id 없음)에 돌고, `pickSample`은 저장 후 분류 파이프라인(id 있음)에서 돈다. `bucketByClassification`은 분류가 끝난 화면용이다. 편의를 위해 하나로 합치지 마라 — id 없는 값이 분류 경로로 흘러들면 결과를 어느 행에 쓸지 알 수 없게 된다.
+`serverEnv('SUPABASE_SERVICE_ROLE_KEY')`를 **호출 시점에** 읽는다(`src/lib/env.ts`). 모듈 로드 시점에 읽으면 키 없는 빌드가 깨진다.
 
-### 1. 집계 (`summarize.ts`)
+## A-5. 테스트
 
-- `totalKrw` — 전체 합. **정수 연산만.** 음수(환불) 행도 그대로 더한다
-- `periods` — `occurredOn`의 앞 7자리로 `YYYY-MM` 그룹핑, 오름차순
-- `topMerchants` — 가맹점명별 합계 내림차순 상위 10건
-- `rowCount` — 행 수
+래퍼 3개는 팩토리 함수라 얇게 테스트한다 — `@supabase/ssr`을 모킹하고, 올바른 환경변수 키로 호출되는지와 admin이 로드 시점에 `process.env`를 읽지 않는지를 검증한다. **실제 Supabase에 접속하지 마라.**
 
-가맹점명은 집계 전에 정규화한다: 앞뒤 공백 제거, 연속 공백 1칸으로, 말미의 지점 표기(`강남점`, `1호점`)는 **제거하지 않는다.** 이유: 지점이 다르면 성격이 다를 수 있고(본사 근처 카페 vs 여행지 카페), 병합하면 되돌릴 수 없다.
+SQL 자체는 테스트하지 않는다. 대신 검증 절차의 `grep` 체크리스트로 고정한다.
 
-부동소수점을 거치지 마라. `reduce`로 정수를 누적한다.
+**중간 확인**: `npx vitest run src/lib/supabase` 가 통과하면 B로 넘어간다.
 
-### 2. fingerprint (`fingerprint.ts`)
+---
 
+# B. 세션과 인증 판정
+
+인증 **인프라**만 만든다. Google 연결 플로우(`linkIdentity`·`signInWithOAuth`)는 여기서 구현하지 않는다 — 여기서는 **어느 쪽을 쓸지 판정하는 함수까지만** 만든다.
+
+## B-1. `src/middleware.ts` — 세션 갱신
+
+`@supabase/ssr`은 미들웨어에서 세션 쿠키를 갱신하는 것이 전제다. 이게 없으면 Server Component가 만료된 세션을 보게 된다.
+
+```ts
+export async function middleware(request: NextRequest): Promise<NextResponse>
+export const config = { matcher: [/* 정적 자산·이미지·favicon 제외 */] }
 ```
-정렬 키: `${occurredOn}|${merchant}|${amountKrw}` 문자열의 사전순
-fingerprint = sha256(정렬된 전체 행을 개행으로 이은 문자열)
+
+- `createServerClient`로 쿠키를 읽고 `supabase.auth.getUser()`를 호출해 세션을 갱신한다
+- 응답에 갱신된 쿠키를 반드시 다시 심는다
+- **여기서 `signInAnonymously()`를 호출하지 마라.** 이유: 미들웨어는 모든 요청에 걸리므로 랜딩을 스쳐간 크롤러까지 계정을 만든다
+
+**TDD 가드 주의**: `src/middleware.ts`는 테스트 선행 대상이다. `src/middleware.test.ts`를 먼저 작성하라. Supabase 클라이언트를 모킹하고, matcher가 정적 경로를 제외하는지와 쿠키가 응답에 실리는지를 검증한다.
+
+## B-2. `src/lib/supabase/auth.ts` — 경로 분기 판정
+
+이 프로젝트의 인증 판정은 **전부 이 파일에서만** 한다. 다른 곳에 복제하지 마라.
+
+```ts
+export type AuthRoute = 'link' | 'signin'
+
+/** 현재 세션이 익명이고 귀속되지 않은 결과를 들고 있으면 'link', 아니면 'signin' */
+export function decideAuthRoute(params: {
+  isAnonymous: boolean
+  hasPendingAnalysis: boolean
+}): AuthRoute
+
+/** 파일 드롭 시점에 호출. 이미 세션이 있으면 아무것도 하지 않는다. */
+export async function ensureSession(): Promise<{ userId: string; isAnonymous: boolean }>
+
+/** 현재 사용자가 익명인지. user.is_anonymous 로 판정한다. */
+export function isAnonymousUser(user: User | null): boolean
 ```
 
-**정렬 후 해싱하는 이유**: 같은 명세서를 다른 순서로 내려받아도 같은 지문이 나와야 중복이 잡힌다.
+`decideAuthRoute`의 규칙:
+- `isAnonymous && hasPendingAnalysis` → `'link'`
+- 그 외 → `'signin'`
 
-`crypto.subtle.digest`를 쓴다(브라우저·Node 양쪽에서 동작). Node의 `crypto` 모듈을 import 하지 마라 — 이 코드는 브라우저에서도 돈다.
+> 이 판정이 틀리면 사용자가 분석을 잃는다. 익명 세션에 결과가 있는데 `signInWithOAuth()`를 부르면 **새 계정이 만들어지고 uid가 버려진다.** 반드시 테스트로 고정하라.
 
-### 3. 확신도 버킷 (`bucket.ts`)
+`ensureSession`은 **파일 드롭 시점에만** 호출되도록 만든다. 이 함수 자체는 세션이 없을 때만 `signInAnonymously()`를 호출하고, 있으면 현재 세션을 반환한다.
 
-`bucketByClassification`은 분류된 거래를 화면 단위로 나눈다.
+## B-3. `src/lib/supabase/session.ts` — 서버 측 헬퍼
 
-- `confidence`가 `CONFIDENCE_THRESHOLD`(0.7) 미만이면 **`classification` 값과 무관하게 `review` 버킷**에 넣는다
-- `classification`이 `null`인 건은 `unclassified` 버킷 (표본 모드에서 분류되지 않고 남은 건)
-- `isUserEdited`가 `true`면 사용자가 이미 확정한 것이므로 `confidence`와 무관하게 `review`에 넣지 않는다
-- `businessTotalKrw` / `personalTotalKrw`는 각 버킷의 정수 합. **`review`와 `unclassified`는 어느 쪽에도 더하지 않는다**
+```ts
+/** 라우트 핸들러·Server Component에서 현재 사용자. 없으면 null */
+export async function getCurrentUser(): Promise<User | null>
 
-마지막 규칙이 중요한 이유: 확인이 안 끝난 금액을 경비 합계에 넣으면 사용자가 그 숫자를 신고에 쓴다. 미확정은 미확정으로 보여야 한다.
+/** 없으면 401을 던지는 버전. 라우트 핸들러용 */
+export async function requireUser(): Promise<User>
 
-### 4. 표본 선택 (`pickSample`)
+/** effective_tier DB 함수를 호출한다. 판정 로직을 여기서 다시 구현하지 마라. */
+export async function getEffectiveTier(userId: string): Promise<Tier>
+```
 
-익명 프리뷰에서 AI로 보낼 거래를 고른다. **금액 절대값 내림차순 상위 `size`건.**
+`getEffectiveTier`는 A에서 만든 `public.effective_tier(uid)` 함수를 RPC로 호출한다. **`tier`와 `current_period_end`를 가져와 애플리케이션에서 비교하지 마라.** 이유: 판정이 두 곳에 존재하면 반드시 어긋난다.
 
-이유: 20건으로 "AI가 제대로 가르는가"를 판단시켜야 하는데, 무작위로 고르면 편의점 결제만 나올 수 있다. 금액이 큰 건이 판단 가치가 높다.
+## B-4. 테스트
 
-동점이면 `occurredOn`, 그다음 `id` 내림차순으로 안정 정렬한다. 이유: 같은 입력에 같은 표본이 나와야 테스트가 고정되고, 재실행 시 다른 건이 뽑히지 않는다.
+Supabase 클라이언트를 모킹한다. 실제 서비스에 접속하지 마라.
 
-반환값은 입력 객체를 그대로 담는다(`id` 포함). 새 객체로 복사하며 `id`를 떨어뜨리지 마라 — 호출부(step11)가 이 `id`로 분류 결과를 저장한다.
+- `decideAuthRoute` 네 조합 전부
+- `ensureSession`이 기존 세션이 있을 때 `signInAnonymously`를 부르지 않는지
+- `requireUser`가 미인증에서 던지는지
+- `getEffectiveTier`가 RPC를 호출하는지 (직접 비교 로직이 없는지)
+- `isAnonymousUser`가 `user.is_anonymous`를 보는지
 
-### 테스트
-
-- 음수(환불) 행이 섞인 합계
-- 정수 유지 — 소수점이 개입하지 않는지
-- 같은 행을 순서만 바꿔 넣었을 때 fingerprint가 동일한가
-- 한 행만 금액이 달라도 fingerprint가 달라지는가
-- `confidence: 0.6`인 `business` 건이 `review`로 가는가
-- `isUserEdited: true`이고 `confidence: 0.5`인 건이 `review`로 가지 **않는가**
-- `review`·`unclassified` 금액이 `businessTotalKrw`에 포함되지 **않는가**
-- `pickSample`이 금액 상위순이며 같은 입력에 같은 출력인가
-- `pickSample` 결과의 각 원소에 `id`가 보존되는가
+---
 
 ## Acceptance Criteria
 
@@ -86,28 +224,45 @@ fingerprint = sha256(정렬된 전체 행을 개행으로 이은 문자열)
 npm run lint
 npm run build
 npm run test
-npx vitest run src/lib/analysis
+npx vitest run src/lib/supabase src/middleware.test.ts
 ```
 
 ## 검증 절차
 
 1. 위 AC 커맨드를 실행한다.
 2. 아키텍처 체크리스트:
-   - `grep -rn "parseFloat\|Math.round\|toFixed" src/lib/analysis/` — 금액 경로에 부동소수점이 없는가?
-   - `grep -rn "from 'crypto'\|require('crypto')" src/lib/analysis/` 가 비어 있는가?
-   - Anthropic·Supabase 호출이 없는 순수 함수인가?
-   - `CONFIDENCE_THRESHOLD`를 `src/types/tier.ts`에서 import 하는가? (하드코딩 금지)
+   - `grep -c "with check" supabase/migrations/0001_initial.sql` 이 테이블 수 이상인가?
+   - `grep -n "enable row level security" supabase/migrations/0001_initial.sql` 이 5줄인가?
+   - `grep -n "amount_krw" supabase/migrations/0001_initial.sql` 의 타입이 `bigint`인가?
+   - `grep -n "numeric\|float\|real" supabase/migrations/0001_initial.sql` — `confidence` 외에 없는가?
+   - `effective_tier`·`increment_usage`·`mark_sample_used` 세 함수가 전부 있는가?
+   - `increment_usage`가 `uid`를 인자로 받지 **않는가**? (함수 안에서 `auth.uid()`를 읽어야 한다)
+   - `usage_counters`에 INSERT·UPDATE·DELETE 정책이 **없는가**?
+   - `revoke update` 목록에 `tier`·`current_period_end`·`sample_used`·`polar_*`가 전부 있는가?
+   - `admin.ts`에 사용처 제한 주석이 있는가?
+   - `grep -rn "signInAnonymously" src/` 결과가 `src/lib/supabase/auth.ts`에만 나오는가? (미들웨어·layout·page에 있으면 위반)
+   - `getEffectiveTier`가 RPC를 호출하고, `current_period_end`를 직접 비교하지 않는가?
+   - 미들웨어가 응답에 갱신된 쿠키를 실어 보내는가?
 3. 결과에 따라 `phases/0-mvp/index.json`의 step 4를 업데이트한다:
-   - 성공 → `"status": "completed"`, `"summary"`에 공개 함수 4개와 fingerprint 정의를 한 줄로
-   - 실패 → `"status": "error"` + `"error_message"`
-   - 사용자 개입 필요 → `"status": "blocked"` + `"blocked_reason"` 후 중단
+   - 성공 → `"status": "completed"`, `"summary"`에 마이그레이션 파일 경로, 테이블 5개와 함수 3개 이름, 래퍼 3개 경로, 인증 공개 함수를 한 줄로
+   - 수정 3회 시도 후에도 실패 → `"status": "error"` + `"error_message"`
+   - 사용자 개입 필요 → `"status": "blocked"` + `"blocked_reason"` 후 즉시 중단
 
 ## 금지사항
 
-- 사업경비/개인지출을 판단하는 로직을 만들지 마라. 이유: 분류는 AI가 한다(step10·11). 여기서 규칙으로 흉내 내면 두 개의 진실이 생긴다.
-- 부동소수점 연산을 쓰지 마라. 이유: 통화 합계에 오차가 쌓이고, 이 제품에서 금액 오차는 치명적이다.
-- Node `crypto` 모듈을 import 하지 마라. 이유: 이 코드는 브라우저에서도 실행된다. `crypto.subtle`을 쓴다.
-- `review`·`unclassified` 금액을 경비 합계에 더하지 마라. 이유: 사용자가 미확정 금액을 신고에 쓰게 된다.
-- 가맹점명의 지점 표기를 제거해 병합하지 마라. 이유: 되돌릴 수 없고, 지점별로 성격이 다를 수 있다.
-- DB·네트워크에 접근하지 마라. 이유: 순수 함수여야 브라우저·서버 양쪽에서 같은 코드가 돈다.
+- 실제 Supabase 프로젝트에 마이그레이션을 적용하거나 접속하는 테스트를 쓰지 마라. 이유: 키가 없어 blocked가 되고 이후 step이 전부 멈춘다. 적용은 마지막 step에서 사용자가 한다.
+- `DROP TABLE`을 쓰지 마라. 이유: 훅이 차단하고, 데이터 손실 경로를 남기지 않는다.
+- SELECT 정책만 만들고 끝내지 마라. 이유: `with check`가 없으면 남의 `owner_id`로 INSERT가 통과한다.
+- `amount_krw`에 `numeric`·`real`·`double precision`을 쓰지 마라. 이유: 통화 합계에 오차가 생긴다.
+- 사용자가 `profiles.tier`·`sample_used`를 UPDATE할 수 있게 두지 마라. 이유: 결제 없이 Pro가 되고, 익명 표본 분류를 무한히 쓴다.
+- `usage_counters`에 사용자 INSERT·UPDATE·DELETE 정책을 만들지 마라. 이유: 사용자가 카운터를 0으로 되돌려 쿼터 관문 전체를 무력화한다. 쓰기는 `increment_usage` 함수만 한다.
+- `increment_usage`가 `uid`나 `period`를 인자로 받게 하지 마라. 이유: 남의 카운터를 소진시키는 통로가 된다.
+- RLS 정책을 5개 테이블에 일괄로 걸지 마라. 이유: `usage_counters`와 `profiles`는 사용자 쓰기 권한이 다르다.
+- `admin.ts`를 웹훅 외의 곳에서 쓰지 마라. 이유: RLS가 무력화되어 모든 사용자 데이터가 노출된다.
+- 티어 판정 로직(`tier === 'pro' && end > now()`)을 애플리케이션 코드로 다시 쓰지 마라. 이유: DB 함수와 어긋나는 순간 게이팅이 깨진다.
+- 카드번호 컬럼을 만들지 마라. 이유: 저장하지 않기로 한 데이터다. 컬럼이 있으면 언젠가 채워진다.
+- 미들웨어나 layout/page에서 `signInAnonymously()`를 호출하지 마라. 이유: 랜딩을 스쳐간 방문자·크롤러까지 `auth.users` 행을 만든다. 파일 드롭 시점에만 만든다.
+- `signInWithOAuth()`나 `linkIdentity()`를 여기서 구현하지 마라. 이유: step6의 범위다. 여기서는 어느 쪽을 쓸지 판정하는 함수만 만든다.
+- 쿼터 검사를 여기서 하지 마라. 이유: step5의 범위다.
+- UI를 만들지 마라. 이유: step6의 범위다.
 - 기존 테스트를 깨뜨리지 마라.
