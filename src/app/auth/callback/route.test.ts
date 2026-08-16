@@ -82,4 +82,40 @@ describe("GET /auth/callback", () => {
     expect(location.pathname).toBe("/analyses/analysis-1");
     expect(location.searchParams.get("auth_error")).toBeTruthy();
   });
+
+  // Supabase는 연결 실패를 code 없이 error_code 쿼리로 돌려보낸다. 이걸 구분하지
+  // 않으면 "이미 가입된 Google"과 "코드 누락"이 같은 메시지가 되어, 사용자는
+  // 무엇을 해야 하는지 알 수 없는 채로 화면에 갇힌다.
+  it("이미 다른 계정에 연결된 Google이면 identity_taken으로 되돌린다", async () => {
+    const res = await GET(
+      request(
+        "?error=server_error&error_code=identity_already_exists&next=/analyses/analysis-1",
+      ),
+    );
+
+    expect(mocks.exchangeCodeForSession).not.toHaveBeenCalled();
+    const location = new URL(res.headers.get("location") ?? "");
+    expect(location.pathname).toBe("/analyses/analysis-1");
+    expect(location.searchParams.get("auth_error")).toBe("identity_taken");
+  });
+
+  it("그 밖의 OAuth 실패는 oauth_failed로 되돌린다", async () => {
+    const res = await GET(
+      request("?error=access_denied&next=/analyses/analysis-1"),
+    );
+
+    expect(mocks.exchangeCodeForSession).not.toHaveBeenCalled();
+    const location = new URL(res.headers.get("location") ?? "");
+    expect(location.searchParams.get("auth_error")).toBe("oauth_failed");
+  });
+
+  it("OAuth 에러가 와도 next의 오리진 검사는 그대로 적용한다", async () => {
+    const res = await GET(
+      request("?error_code=identity_already_exists&next=https://evil.com/steal"),
+    );
+
+    const location = new URL(res.headers.get("location") ?? "");
+    expect(location.origin).toBe("http://localhost");
+    expect(location.pathname).toBe("/dashboard");
+  });
 });

@@ -15,6 +15,17 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const code = url.searchParams.get("code");
   const next = safeNext(url.searchParams.get("next"));
 
+  // 연결 실패는 code 없이 error/error_code 쿼리로 돌아온다. code 누락과 뭉뚱그리면
+  // "이미 가입된 Google"인지 아닌지를 사용자에게 안내할 수 없다.
+  const oauthError =
+    url.searchParams.get("error_code") ?? url.searchParams.get("error");
+
+  if (oauthError) {
+    return NextResponse.redirect(
+      withError(request, next, mapOAuthError(oauthError)),
+    );
+  }
+
   if (!code) {
     return NextResponse.redirect(withError(request, next, "missing_code"));
   }
@@ -34,6 +45,15 @@ function safeNext(value: string | null): string {
   if (!value) return DEFAULT_NEXT;
   if (!value.startsWith("/") || value.startsWith("//")) return DEFAULT_NEXT;
   return value;
+}
+
+/**
+ * 익명 세션에 이미 가입된 Google을 붙이려 하면 Supabase가
+ * `identity_already_exists`를 돌려준다. 재시도해도 결과가 같으므로
+ * 다른 실패와 구분해, 도착 화면이 로그인 경로를 안내하게 한다.
+ */
+function mapOAuthError(code: string): string {
+  return code === "identity_already_exists" ? "identity_taken" : "oauth_failed";
 }
 
 function withError(request: NextRequest, next: string, reason: string): URL {

@@ -7,6 +7,7 @@ import type { ClassifiedTransaction } from "@/types/analysis";
 import type { AccountCode, Classification } from "@/types/domain";
 import { QUOTA } from "@/types/tier";
 
+import { AuthErrorNotice } from "@/components/auth/AuthErrorNotice";
 import { UpgradeButton } from "@/components/billing/UpgradeButton";
 import { ChatPanel } from "@/components/dashboard/ChatPanel";
 import { ClassifyFullButton } from "@/components/dashboard/ClassifyFullButton";
@@ -39,13 +40,16 @@ interface TxRow {
 
 export default async function AnalysisDetailPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams: Promise<{ auth_error?: string }>;
 }) {
   const user = await getCurrentUser();
   if (!user) redirect("/");
 
   const { id: analysisId } = await params;
+  const { auth_error: authError } = await searchParams;
   const supabase = await createServerSupabase();
 
   const { data: analysis } = await supabase
@@ -100,6 +104,8 @@ export default async function AnalysisDetailPage({
       <p className="no-print rounded-md bg-surface-soft px-4 py-3 text-xs text-muted">
         이 결과는 세무 조언이 아닙니다. 최종 판단은 세무 대리인과 상의하세요.
       </p>
+
+      {authError && <AuthErrorNotice reason={authError} />}
 
       {/* 제목과 요약 수치는 같은 대상을 설명한다. 붙여 두고 다른 섹션과는 떼어 놓는다. */}
       <header className="flex flex-col gap-4">
