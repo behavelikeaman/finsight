@@ -28,6 +28,32 @@ export interface ClassifyOutputItem {
 
 const MODEL = "claude-opus-5";
 
+/**
+ * 한 번의 API 호출에 실어 보낼 거래 건수.
+ *
+ * 전건 분류는 최대 10,000건까지 들어온다. 한 호출에 전부 보내면 tool 응답이
+ * max_tokens에서 잘려 normalize()의 건수 검사에 걸리고, 사용자는 결과 없이
+ * 502만 받는다(비용은 이미 나간 뒤다). 그래서 반드시 나눠 보낸다.
+ */
+export const BATCH_SIZE = 100;
+
+/**
+ * 배치 하나의 응답 상한.
+ *
+ * 건당 tool JSON이 약 35토큰이라 100건이면 약 3,500토큰이다. 여기에 thinking
+ * 몫을 더 얹는다 — claude-opus-5는 thinking이 기본으로 켜져 있고, max_tokens는
+ * thinking과 응답 텍스트를 **합쳐서** 제한한다. 넉넉하지 않으면 조용히 잘린다.
+ */
+const MAX_TOKENS = 16_000;
+
+/**
+ * 동시에 띄우는 배치 수.
+ *
+ * 순차로 돌리면 800건짜리 명세서가 8회 직렬 호출이 되어 서버리스 실행 시간을
+ * 넘긴다. 반대로 무제한으로 풀면 레이트리밋에 걸린다.
+ */
+const CONCURRENCY = 4;
+
 const CLASSIFY_TOOL_NAME = "submit_classifications";
 
 const CLASSIFY_TOOL: Anthropic.Tool = {
@@ -77,13 +103,37 @@ export async function classifyTransactions(
   const { rows } = input;
   if (rows.length === 0) return [];
 
+  const batches: IdentifiedRow[][] = [];
+  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+    batches.push(rows.slice(i, i + BATCH_SIZE));
+  }
+
+  const results: ClassifyOutputItem[] = [];
+
+  // CONCURRENCY개씩 묶어 순차로 흘린다. 한 배치라도 실패하면 던진다 —
+  // 부분 결과를 반환하면 호출부가 "분류 완료"로 오인해 남은 건이 영영 빈다.
+  for (let i = 0; i < batches.length; i += CONCURRENCY) {
+    const wave = batches.slice(i, i + CONCURRENCY);
+    const settled = await Promise.all(wave.map(classifyBatch));
+
+    for (const items of settled) {
+      results.push(...items);
+    }
+  }
+
+  return results;
+}
+
+async function classifyBatch(
+  rows: IdentifiedRow[],
+): Promise<ClassifyOutputItem[]> {
   const { data: redacted } = redactRows(rows);
   const { system, ledger } = buildPromptBlocks(redacted);
 
   const client = getClient();
   const message = await client.messages.create({
     model: MODEL,
-    max_tokens: 4096,
+    max_tokens: MAX_TOKENS,
     system,
     messages: [
       {
@@ -100,6 +150,14 @@ export async function classifyTransactions(
     tools: [CLASSIFY_TOOL],
     tool_choice: { type: "tool", name: CLASSIFY_TOOL_NAME },
   });
+
+  // 잘림은 건수 불일치로도 드러나지만, 그 메시지만 보면 모델이 건수를 틀린
+  // 것처럼 읽힌다. 원인을 그대로 말해준다.
+  if (message.stop_reason === "max_tokens") {
+    throw new Error(
+      `모델 응답이 max_tokens(${MAX_TOKENS})에서 잘렸습니다. 배치 크기를 줄이거나 상한을 올려야 합니다.`,
+    );
+  }
 
   const rawItems = extractItems(message);
   return normalize(rawItems, rows);

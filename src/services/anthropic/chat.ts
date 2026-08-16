@@ -15,6 +15,15 @@ import { buildPromptBlocks } from "./prompt";
 
 const MODEL = "claude-opus-5";
 
+/**
+ * 답변 상한.
+ *
+ * claude-opus-5는 thinking이 기본으로 켜져 있고, max_tokens는 thinking과 답변
+ * 텍스트를 **합쳐서** 제한한다. 예전 값(2,048)에서는 thinking이 예산을 먹고
+ * 텍스트 블록이 아예 안 나와, 사용자에게는 원인 없는 502로만 보였다.
+ */
+const MAX_TOKENS = 8_000;
+
 export async function askAboutLedger(
   rows: IdentifiedRow[],
   question: string,
@@ -25,7 +34,7 @@ export async function askAboutLedger(
   const client = getClient();
   const message = await client.messages.create({
     model: MODEL,
-    max_tokens: 2048,
+    max_tokens: MAX_TOKENS,
     system,
     messages: [
       {
@@ -37,6 +46,13 @@ export async function askAboutLedger(
     ],
   });
 
+  if (message.stop_reason === "max_tokens") {
+    throw new Error(
+      `모델 답변이 max_tokens(${MAX_TOKENS})에서 잘렸습니다.`,
+    );
+  }
+
+  // thinking 블록이 먼저 오므로 타입으로 골라낸다. content[0]을 집으면 안 된다.
   const block = message.content.find(
     (b): b is Anthropic.TextBlock => b.type === "text",
   );

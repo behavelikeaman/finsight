@@ -111,29 +111,46 @@ export async function PATCH(
   return NextResponse.json(response);
 }
 
+/**
+ * 한 번에 띄우는 UPDATE 수.
+ *
+ * edits 상한은 MAX_EDITS(10,000)다. 건마다 값이 달라 한 문장으로 합칠 수는
+ * 없지만, 전부를 Promise.all로 한꺼번에 띄우면 커넥션이 고갈되고 서버리스
+ * 실행 시간을 넘긴다.
+ */
+const SAVE_CONCURRENCY = 25;
+
 async function saveEdits(
   supabase: SupabaseClient,
   userId: string,
   edits: TransactionEdit[],
 ): Promise<boolean> {
-  const results = await Promise.all(
-    edits.map((edit) =>
-      supabase
-        .from("transactions")
-        .update({
-          classification: edit.classification,
-          account_code: edit.accountCode,
-          is_user_edited: true,
-          // 확신도는 AI 판단의 속성이다. 사람이 확정한 건에 남겨두면
-          // bucketByClassification이 다시 "확인 필요"로 올린다.
-          confidence: null,
-        })
-        .eq("id", edit.id)
-        .eq("owner_id", userId),
-    ),
-  );
+  let failed = false;
 
-  return results.some((result) => (result as { error: unknown }).error);
+  for (let i = 0; i < edits.length; i += SAVE_CONCURRENCY) {
+    const results = await Promise.all(
+      edits.slice(i, i + SAVE_CONCURRENCY).map((edit) =>
+        supabase
+          .from("transactions")
+          .update({
+            classification: edit.classification,
+            account_code: edit.accountCode,
+            is_user_edited: true,
+            // 확신도는 AI 판단의 속성이다. 사람이 확정한 건에 남겨두면
+            // bucketByClassification이 다시 "확인 필요"로 올린다.
+            confidence: null,
+          })
+          .eq("id", edit.id)
+          .eq("owner_id", userId),
+      ),
+    );
+
+    if (results.some((result) => (result as { error: unknown }).error)) {
+      failed = true;
+    }
+  }
+
+  return failed;
 }
 
 /** derivePattern(merchant) 기준, 충돌 키 (owner_id, merchant_pattern)로 upsert한다. */

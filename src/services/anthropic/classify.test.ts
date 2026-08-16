@@ -16,12 +16,32 @@ vi.mock("@/lib/redact", () => ({
   redactRows: mocks.redactRows,
 }));
 
-import { classifyTransactions } from "./classify";
+import { BATCH_SIZE, classifyTransactions } from "./classify";
 
 const ROWS: IdentifiedRow[] = [
   { id: "tx-a", occurredOn: "2026-01-05", merchant: "스타벅스", amountKrw: 5500 },
   { id: "tx-b", occurredOn: "2026-01-07", merchant: "이마트24", amountKrw: 12000 },
 ];
+
+/** 거래 n건을 만든다. 배치 분할 검증용. */
+function makeRows(n: number): IdentifiedRow[] {
+  return Array.from({ length: n }, (_, i) => ({
+    id: `tx-${i}`,
+    occurredOn: "2026-03-01",
+    merchant: `가맹점${i}`,
+    amountKrw: 1000 + i,
+  }));
+}
+
+/** SDK 호출 인자에서 이 배치가 몇 건을 요청했는지 읽는다. */
+function requestedCount(params: unknown): number {
+  const ledger = (
+    params as { messages: { content: { text?: string }[] }[] }
+  ).messages[0]?.content[0]?.text;
+
+  const match = /거래내역 \((\d+)건\)/.exec(ledger ?? "");
+  return Number(match?.[1] ?? 0);
+}
 
 /** tool_use 블록을 담은 최소 Message 응답을 흉내낸다. */
 function toolResponse(items: unknown[]) {
@@ -54,10 +74,11 @@ beforeEach(() => {
     return { data: [...rows], removedCount: 0 };
   });
 
-  mocks.create.mockImplementation(async () => {
+  // 요청한 건수만큼 돌려준다. 배치가 나뉘면 배치마다 그 크기에 맞춰 응답한다.
+  mocks.create.mockImplementation(async (params: unknown) => {
     mocks.callOrder.push("create");
     return toolResponse(
-      ROWS.map((_, i) => ({
+      Array.from({ length: requestedCount(params) }, (_, i) => ({
         index: i + 1,
         classification: "business",
         accountCode: "supplies",
@@ -211,5 +232,81 @@ describe("classifyTransactions", () => {
 
     const params = mocks.create.mock.calls[0]?.[0] as { model: string };
     expect(params.model).toBe("claude-opus-5");
+  });
+
+  describe("배치 분할", () => {
+    it("BATCH_SIZE 이하면 한 번만 호출한다", async () => {
+      await classifyTransactions({ rows: makeRows(BATCH_SIZE) });
+
+      expect(mocks.create).toHaveBeenCalledTimes(1);
+    });
+
+    it("BATCH_SIZE를 넘으면 나눠 호출한다", async () => {
+      await classifyTransactions({ rows: makeRows(BATCH_SIZE * 2 + 1) });
+
+      expect(mocks.create).toHaveBeenCalledTimes(3);
+    });
+
+    it("어느 배치도 BATCH_SIZE를 넘게 요청하지 않는다", async () => {
+      await classifyTransactions({ rows: makeRows(BATCH_SIZE * 2 + 1) });
+
+      for (const call of mocks.create.mock.calls) {
+        expect(requestedCount(call[0])).toBeLessThanOrEqual(BATCH_SIZE);
+      }
+    });
+
+    it("나뉜 배치의 결과를 빠짐없이 합쳐 돌려준다", async () => {
+      const rows = makeRows(BATCH_SIZE * 2 + 1);
+
+      const result = await classifyTransactions({ rows });
+
+      expect(result).toHaveLength(rows.length);
+      expect(new Set(result.map((r) => r.id))).toEqual(
+        new Set(rows.map((r) => r.id)),
+      );
+    });
+
+    it("두 번째 배치가 실패하면 전체가 실패한다", async () => {
+      let call = 0;
+      mocks.create.mockImplementation(async (params: unknown) => {
+        call += 1;
+        if (call === 2) throw new Error("api down");
+        return toolResponse(
+          Array.from({ length: requestedCount(params) }, (_, i) => ({
+            index: i + 1,
+            classification: "business",
+            accountCode: "supplies",
+            confidence: 0.9,
+          })),
+        );
+      });
+
+      await expect(
+        classifyTransactions({ rows: makeRows(BATCH_SIZE * 2) }),
+      ).rejects.toThrow();
+    });
+  });
+
+  describe("응답 잘림", () => {
+    it("배치 하나의 결과를 담을 만큼 max_tokens를 잡는다", async () => {
+      await classifyTransactions({ rows: makeRows(BATCH_SIZE) });
+
+      const params = mocks.create.mock.calls[0]?.[0] as { max_tokens: number };
+      // 건당 tool JSON은 약 35토큰이다. 여기에 thinking 몫까지 얹어야 한다 —
+      // claude-opus-5는 thinking이 기본 on이고 max_tokens는 thinking과 응답을
+      // 함께 제한한다.
+      expect(params.max_tokens).toBeGreaterThan(BATCH_SIZE * 35);
+    });
+
+    it("max_tokens에서 잘리면 잘렸다고 알려주는 에러를 낸다", async () => {
+      mocks.create.mockImplementation(async () => ({
+        ...toolResponse([]),
+        stop_reason: "max_tokens",
+      }));
+
+      await expect(classifyTransactions({ rows: ROWS })).rejects.toThrow(
+        /max_tokens/,
+      );
+    });
   });
 });

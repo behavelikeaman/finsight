@@ -256,4 +256,58 @@ describe("PATCH /api/analyses/:id/transactions", () => {
     expect(payload.length).toBe(1);
     expect(payload[0]?.merchant_pattern).toBe("스타벅스");
   });
+
+  it("수정 건이 많아도 update를 한꺼번에 다 띄우지 않는다", async () => {
+    existingTxFixture = Array.from({ length: 300 }, (_, i) => ({
+      id: `tx-${i}`,
+      merchant: `가맹점${i}`,
+    }));
+
+    let inFlight = 0;
+    let maxInFlight = 0;
+
+    mocks.from.mockImplementation((table: string) => {
+      if (table === "analyses") {
+        return chain({ data: analysisOwnerRow, error: null });
+      }
+      if (table !== "transactions") {
+        throw new Error(`예상치 못한 테이블: ${table}`);
+      }
+
+      transactionsCalls += 1;
+      if (transactionsCalls === 1) {
+        return chain({ data: existingTxFixture, error: null });
+      }
+
+      const obj: Record<string, unknown> = {
+        update: () => obj,
+        eq: () => obj,
+        then: (resolve: (v: unknown) => unknown) => {
+          inFlight += 1;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          return new Promise((r) => setTimeout(r, 0)).then(() => {
+            inFlight -= 1;
+            return resolve({ data: null, error: null });
+          });
+        },
+      };
+      return obj;
+    });
+
+    const res = await PATCH(
+      request({
+        edits: existingTxFixture.map((tx) => ({
+          id: tx.id,
+          classification: "business",
+          accountCode: "supplies",
+        })),
+        saveAsRule: false,
+      }),
+      ctx(),
+    );
+
+    expect(res.status).toBe(200);
+    // edits 상한은 10,000건이다. 한꺼번에 띄우면 커넥션이 고갈된다.
+    expect(maxInFlight).toBeLessThanOrEqual(50);
+  });
 });

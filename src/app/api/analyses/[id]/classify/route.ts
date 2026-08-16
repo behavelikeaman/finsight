@@ -221,6 +221,15 @@ async function readMode(request: NextRequest): Promise<ClassifyMode> {
   }
 }
 
+/**
+ * 한 번에 띄우는 UPDATE 수.
+ *
+ * 건마다 값이 달라 한 문장으로 합칠 수 없으므로 건별 UPDATE가 맞다. 다만
+ * 전건 분류는 수천 건이 들어오는데, 그걸 Promise.all로 한꺼번에 띄우면
+ * 커넥션이 고갈되고 서버리스 실행 시간을 넘긴다.
+ */
+const SAVE_CONCURRENCY = 25;
+
 /** id 기준으로만 되짚어 갱신한다. owner_id 조건은 RLS의 2차 방어에 더해 명시적으로 건다. */
 async function saveClassifications(
   supabase: SupabaseClient,
@@ -229,22 +238,30 @@ async function saveClassifications(
 ): Promise<boolean> {
   if (items.length === 0) return false;
 
-  const results = await Promise.all(
-    items.map((item) =>
-      supabase
-        .from("transactions")
-        .update({
-          classification: item.classification,
-          account_code: item.accountCode,
-          confidence: item.confidence,
-          rule_id: item.ruleId,
-        })
-        .eq("id", item.id)
-        .eq("owner_id", userId),
-    ),
-  );
+  let failed = false;
 
-  return results.some((result) => (result as { error: unknown }).error);
+  for (let i = 0; i < items.length; i += SAVE_CONCURRENCY) {
+    const results = await Promise.all(
+      items.slice(i, i + SAVE_CONCURRENCY).map((item) =>
+        supabase
+          .from("transactions")
+          .update({
+            classification: item.classification,
+            account_code: item.accountCode,
+            confidence: item.confidence,
+            rule_id: item.ruleId,
+          })
+          .eq("id", item.id)
+          .eq("owner_id", userId),
+      ),
+    );
+
+    if (results.some((result) => (result as { error: unknown }).error)) {
+      failed = true;
+    }
+  }
+
+  return failed;
 }
 
 function jsonResponse(body: ClassifyResponse): NextResponse {

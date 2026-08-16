@@ -382,4 +382,82 @@ describe("POST /api/analyses/:id/classify", () => {
     );
     expect(tx2Chain?.eq).toHaveBeenCalledWith("owner_id", "uid-1");
   });
+
+  describe("저장 동시성", () => {
+    /** update 체인이 동시에 몇 개나 떠 있는지 재는 supabase 목. */
+    function trackingSupabase() {
+      let inFlight = 0;
+      let maxInFlight = 0;
+
+      mocks.from.mockImplementation((table: string) => {
+        if (table === "analyses") {
+          analysesCalls += 1;
+          return chain({
+            data: analysesCalls === 1 ? analysisOwnerRow : null,
+            error: null,
+          });
+        }
+
+        if (table === "user_rules") return chain({ data: [], error: null });
+
+        if (table !== "transactions") {
+          throw new Error(`예상치 못한 테이블: ${table}`);
+        }
+
+        transactionsCalls += 1;
+        if (transactionsCalls === 1) {
+          return chain({ data: pendingRowsFixture, error: null });
+        }
+
+        const obj: Record<string, unknown> = {
+          update: () => obj,
+          eq: () => obj,
+          then: (resolve: (v: unknown) => unknown) => {
+            inFlight += 1;
+            maxInFlight = Math.max(maxInFlight, inFlight);
+            // 즉시 resolve하면 동시 실행이 관측되지 않는다. 한 틱 미룬다.
+            return new Promise((r) => setTimeout(r, 0)).then(() => {
+              inFlight -= 1;
+              return resolve({ data: null, error: null });
+            });
+          },
+        };
+        return obj;
+      });
+
+      return { max: () => maxInFlight };
+    }
+
+    it("거래가 많아도 update를 한꺼번에 다 띄우지 않는다", async () => {
+      pendingRowsFixture = Array.from({ length: 300 }, (_, i) => ({
+        id: `tx-${i}`,
+        occurred_on: "2026-01-05",
+        merchant: `가맹점${i}`,
+        amount_krw: 1000 + i,
+      }));
+      const tracker = trackingSupabase();
+
+      const res = await POST(request({ mode: "full" }), ctx());
+
+      expect(res.status).toBe(200);
+      // 300건을 Promise.all로 한 번에 띄우면 커넥션이 고갈되고 서버리스
+      // 실행 시간을 넘긴다.
+      expect(tracker.max()).toBeLessThanOrEqual(50);
+    });
+
+    it("동시성을 제한해도 모든 거래를 저장한다", async () => {
+      pendingRowsFixture = Array.from({ length: 120 }, (_, i) => ({
+        id: `tx-${i}`,
+        occurred_on: "2026-01-05",
+        merchant: `가맹점${i}`,
+        amount_krw: 1000 + i,
+      }));
+      trackingSupabase();
+
+      const res = await POST(request({ mode: "full" }), ctx());
+      const json = (await res.json()) as { ok: true; classified: number };
+
+      expect(json.classified).toBe(120);
+    });
+  });
 });

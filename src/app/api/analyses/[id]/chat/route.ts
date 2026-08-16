@@ -2,9 +2,9 @@
  * POST /api/analyses/:id/chat — 파이프라인 3단계(Q&A). Pro 전용.
  *
  * classify 라우트와 이 프로젝트에서 AI 비용이 발생하는 두 경로 중 하나다.
- * askAboutLedger가 classify.ts와 동일한 buildPromptBlocks 프리픽스를 쓰므로,
- * 거래 조회 순서를 고정해야 한다 — 순서가 흔들리면 캐시가 미스되어 입력비가
- * 약 10배가 된다.
+ * 같은 분석에 이어서 묻는 질문들이 system·ledger 프리픽스를 재사용하므로,
+ * 거래 조회 순서를 고정해야 한다 — 순서가 흔들리면 질문마다 캐시가 미스되어
+ * 입력비가 약 10배가 된다.
  */
 import { NextResponse, type NextRequest } from "next/server";
 

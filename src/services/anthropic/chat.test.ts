@@ -65,7 +65,7 @@ describe("askAboutLedger", () => {
     expect(answer).toBe("1월에는 스타벅스에서 5,500원을 썼습니다.");
   });
 
-  it("classify.ts와 동일한 system·ledger 프리픽스를 쓴다(캐시 공유)", async () => {
+  it("buildPromptBlocks가 만든 system·ledger를 그대로 쓴다(질문 간 캐시 재사용)", async () => {
     await askAboutLedger(ROWS, "질문");
 
     const params = mocks.create.mock.calls[0]?.[0] as {
@@ -104,5 +104,36 @@ describe("askAboutLedger", () => {
     }));
 
     await expect(askAboutLedger(ROWS, "질문")).rejects.toThrow();
+  });
+
+  it("thinking 몫까지 감당할 만큼 max_tokens를 잡는다", async () => {
+    await askAboutLedger(ROWS, "질문");
+
+    const params = mocks.create.mock.calls[0]?.[0] as { max_tokens: number };
+    // claude-opus-5는 thinking이 기본 on이고, max_tokens가 thinking과 답변을
+    // 함께 제한한다. 2,048에서는 thinking이 예산을 먹고 답변이 잘린다.
+    expect(params.max_tokens).toBeGreaterThanOrEqual(8_000);
+  });
+
+  it("thinking 블록이 앞에 와도 답변 텍스트를 골라낸다", async () => {
+    mocks.create.mockImplementation(async () => ({
+      ...textResponse("답변입니다."),
+      content: [
+        { type: "thinking", thinking: "", signature: "sig" },
+        { type: "text", text: "답변입니다.", citations: null },
+      ],
+    }));
+
+    await expect(askAboutLedger(ROWS, "질문")).resolves.toBe("답변입니다.");
+  });
+
+  it("max_tokens에서 잘리면 잘렸다고 알려주는 에러를 낸다", async () => {
+    mocks.create.mockImplementation(async () => ({
+      ...textResponse(""),
+      stop_reason: "max_tokens",
+      content: [{ type: "thinking", thinking: "", signature: "sig" }],
+    }));
+
+    await expect(askAboutLedger(ROWS, "질문")).rejects.toThrow(/max_tokens/);
   });
 });
