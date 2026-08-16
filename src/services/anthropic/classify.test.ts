@@ -234,6 +234,21 @@ describe("classifyTransactions", () => {
     expect(params.model).toBe("claude-opus-5");
   });
 
+  it("effort를 low로 낮춰 thinking 비용을 줄인다", async () => {
+    await classifyTransactions({ rows: ROWS });
+
+    const params = mocks.create.mock.calls[0]?.[0] as {
+      output_config?: { effort?: string };
+      thinking?: unknown;
+    };
+
+    expect(params.output_config?.effort).toBe("low");
+    // thinking을 끄면 안 된다. claude-opus-5는 thinking이 꺼진 상태에서
+    // tool 호출을 본문 텍스트로 흘리는 경우가 있고, 그러면 tool_use 블록이
+    // 없어 분류가 조용히 통째로 날아간다.
+    expect(params.thinking).toBeUndefined();
+  });
+
   describe("배치 분할", () => {
     it("BATCH_SIZE 이하면 한 번만 호출한다", async () => {
       await classifyTransactions({ rows: makeRows(BATCH_SIZE) });

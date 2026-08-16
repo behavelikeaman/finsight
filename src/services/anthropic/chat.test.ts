@@ -97,6 +97,16 @@ describe("askAboutLedger", () => {
     expect(params.model).toBe("claude-opus-5");
   });
 
+  it("effort를 medium으로 낮춰 thinking 비용을 줄인다", async () => {
+    await askAboutLedger(ROWS, "질문");
+
+    const params = mocks.create.mock.calls[0]?.[0] as {
+      output_config?: { effort?: string };
+    };
+
+    expect(params.output_config?.effort).toBe("medium");
+  });
+
   it("모델이 텍스트 블록을 반환하지 않으면 에러", async () => {
     mocks.create.mockImplementation(async () => ({
       ...textResponse(""),

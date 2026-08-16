@@ -24,6 +24,17 @@ const MODEL = "claude-opus-5";
  */
 const MAX_TOKENS = 8_000;
 
+/**
+ * thinking 비용을 줄인다. 기본값은 'high'다.
+ *
+ * 분류(low)보다 한 단계 높게 둔 이유는, 여기는 답의 형태를 스키마로 잡아둘 수
+ * 없는 자유 질의응답이고 호출량도 월 100회로 작기 때문이다.
+ */
+const EFFORT = "medium";
+
+/** classify.ts와 같은 이유의 우회. SDK 0.68.0 타입에 output_config가 없다. */
+const EFFORT_PARAM = { output_config: { effort: EFFORT } } as object;
+
 export async function askAboutLedger(
   rows: IdentifiedRow[],
   question: string,
@@ -33,6 +44,7 @@ export async function askAboutLedger(
 
   const client = getClient();
   const message = await client.messages.create({
+    ...EFFORT_PARAM,
     model: MODEL,
     max_tokens: MAX_TOKENS,
     system,

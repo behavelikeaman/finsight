@@ -54,6 +54,27 @@ const MAX_TOKENS = 16_000;
  */
 const CONCURRENCY = 4;
 
+/**
+ * 이 프로젝트에서 가장 큰 비용 레버.
+ *
+ * claude-opus-5는 thinking이 기본으로 켜져 있고 기본 effort가 'high'다. thinking
+ * 토큰은 **출력 토큰 단가로 청구된다.** 거래 분류는 tool 스키마가 답의 형태를
+ * 이미 고정해 둔 기계적인 작업이라, 거기에 high 수준의 추론을 태울 이유가 없다.
+ *
+ * thinking을 아예 끄는 선택지는 쓰지 마라. claude-opus-5는 thinking이 꺼지면
+ * tool 호출을 본문 텍스트로 흘리는 경우가 있는데, 그러면 tool_use 블록이 없어
+ * 분류가 통째로 날아가면서도 에러는 나지 않는다. effort를 낮추는 쪽이 안전하고
+ * 비용도 같이 준다.
+ */
+const EFFORT = "low";
+
+/**
+ * `@anthropic-ai/sdk` 0.68.0의 타입에는 output_config가 아직 없다. 런타임에는
+ * 본문에 그대로 실려 나가므로 스프레드로 얹는다. SDK를 올리면 이 우회를 지우고
+ * 파라미터에 직접 쓴다.
+ */
+const EFFORT_PARAM = { output_config: { effort: EFFORT } } as object;
+
 const CLASSIFY_TOOL_NAME = "submit_classifications";
 
 const CLASSIFY_TOOL: Anthropic.Tool = {
@@ -132,6 +153,7 @@ async function classifyBatch(
 
   const client = getClient();
   const message = await client.messages.create({
+    ...EFFORT_PARAM,
     model: MODEL,
     max_tokens: MAX_TOKENS,
     system,
