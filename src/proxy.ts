@@ -7,11 +7,11 @@ import { NextResponse, type NextRequest } from "next/server";
  * @supabase/ssr 은 미들웨어가 토큰을 갱신하는 것을 전제로 한다. 이게 없으면
  * Server Component가 만료된 세션을 보게 된다.
  *
- * 여기서 익명 로그인을 호출하지 마라. 미들웨어는 모든 요청에 걸리므로 랜딩을
+ * 여기서 익명 로그인을 호출하지 마라. 이 파일은 모든 요청에 걸리므로 랜딩을
  * 스쳐간 크롤러까지 auth.users 행을 만든다. 세션 생성은 파일 드롭
  * 시점(src/lib/supabase/auth.ts 의 ensureSession)에만 한다.
  */
-export async function middleware(request: NextRequest): Promise<NextResponse> {
+export async function proxy(request: NextRequest): Promise<NextResponse> {
   let response = NextResponse.next({ request });
 
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;

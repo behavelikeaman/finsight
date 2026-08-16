@@ -16,7 +16,7 @@ vi.mock("@supabase/ssr", () => ({
   createServerClient: mocks.createServerClient,
 }));
 
-import { config, middleware } from "./middleware";
+import { config, proxy } from "./proxy";
 
 const ORIGINAL = { ...process.env };
 
@@ -45,11 +45,11 @@ afterEach(() => {
   process.env = { ...ORIGINAL };
 });
 
-describe("middleware", () => {
+describe("proxy", () => {
   it("세션을 갱신하기 위해 getUser를 호출한다", async () => {
     mockSupabase();
 
-    await middleware(new NextRequest("http://localhost:3000/analyses/1"));
+    await proxy(new NextRequest("http://localhost:3000/analyses/1"));
 
     expect(mocks.getUser).toHaveBeenCalledTimes(1);
   });
@@ -59,7 +59,7 @@ describe("middleware", () => {
       { name: "sb-access-token", value: "refreshed", options: { path: "/" } },
     ]);
 
-    const response = await middleware(
+    const response = await proxy(
       new NextRequest("http://localhost:3000/analyses/1"),
     );
 
@@ -71,7 +71,7 @@ describe("middleware", () => {
     const request = new NextRequest("http://localhost:3000/");
     request.cookies.set("sb-access-token", "existing");
 
-    await middleware(request);
+    await proxy(request);
 
     const call = mocks.createServerClient.mock.calls[0] as unknown as [
       string,
@@ -87,7 +87,7 @@ describe("middleware", () => {
     process.env.SUPABASE_SERVICE_ROLE_KEY = "service-role-key";
     mockSupabase();
 
-    await middleware(new NextRequest("http://localhost:3000/"));
+    await proxy(new NextRequest("http://localhost:3000/"));
 
     const call = mocks.createServerClient.mock.calls[0] as unknown as [string, string];
     expect(call[1]).toBe("anon-key");
@@ -97,7 +97,7 @@ describe("middleware", () => {
     delete process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
     mockSupabase();
 
-    const response = await middleware(new NextRequest("http://localhost:3000/"));
+    const response = await proxy(new NextRequest("http://localhost:3000/"));
 
     expect(mocks.createServerClient).not.toHaveBeenCalled();
     expect(response.status).toBe(200);
@@ -117,7 +117,7 @@ describe("middleware", () => {
       ),
     }));
 
-    await middleware(new NextRequest("http://localhost:3000/"));
+    await proxy(new NextRequest("http://localhost:3000/"));
 
     // 미들웨어는 모든 요청에 걸린다. 여기서 세션을 만들면 크롤러까지 계정이 생긴다.
     expect(touched).toEqual(["getUser"]);
