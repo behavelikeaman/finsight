@@ -50,7 +50,10 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   let url: string;
   try {
     ({ url } = await createCheckout({ userId, email, successUrl }));
-  } catch {
+  } catch (err) {
+    // 사용자에게는 재시도 안내만 나가지만 원인은 남긴다. 토큰 스코프 부족·
+    // 상품 오설정은 재시도로 풀리지 않고, 로그가 없으면 502만 보게 된다.
+    console.error("[billing/checkout] Polar 체크아웃 생성 실패", err);
     return NextResponse.json({ ok: false }, { status: 502 });
   }
 

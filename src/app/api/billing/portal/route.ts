@@ -52,7 +52,8 @@ export async function POST(): Promise<NextResponse> {
   let url: string;
   try {
     ({ url } = await createCustomerPortalSession(customerId));
-  } catch {
+  } catch (err) {
+    console.error("[billing/portal] Polar 고객 포털 세션 생성 실패", err);
     return NextResponse.json({ ok: false }, { status: 502 });
   }
 

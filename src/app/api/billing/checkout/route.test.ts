@@ -124,4 +124,17 @@ describe("POST /api/billing/checkout", () => {
 
     expect(res.status).toBe(502);
   });
+
+  // 원인을 삼키면 502만 남는다. 토큰 스코프 부족·상품 오설정 같은 설정
+  // 문제를 서버 로그 없이 추적하게 되고, 실제로 그렇게 헤맸다.
+  it("실패 원인을 서버 로그에 남긴다", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const cause = new Error("insufficient_scope");
+    mocks.createCheckout.mockRejectedValue(cause);
+
+    await POST(request({ plan: "pro" }));
+
+    expect(spy).toHaveBeenCalledWith(expect.any(String), cause);
+    spy.mockRestore();
+  });
 });

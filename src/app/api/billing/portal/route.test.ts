@@ -124,6 +124,17 @@ describe("POST /api/billing/portal", () => {
     expect(res.status).toBe(502);
   });
 
+  it("실패 원인을 서버 로그에 남긴다", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const cause = new Error("insufficient_scope");
+    mocks.createCustomerPortalSession.mockRejectedValue(cause);
+
+    await POST();
+
+    expect(spy).toHaveBeenCalledWith(expect.any(String), cause);
+    spy.mockRestore();
+  });
+
   it("GET을 노출하지 않는다 — 프리페치가 포털 세션을 만들면 안 된다", () => {
     expect((route as Record<string, unknown>)["GET"]).toBeUndefined();
   });

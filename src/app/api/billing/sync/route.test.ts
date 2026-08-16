@@ -1,4 +1,5 @@
 import type { User } from "@supabase/supabase-js";
+import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -8,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   createAdminSupabase: vi.fn(),
   fetchSubscription: vi.fn(),
   fetchCustomerSubscription: vi.fn(),
+  fetchCheckout: vi.fn(),
 }));
 
 vi.mock("@/lib/supabase/session", async (importActual) => {
@@ -30,6 +32,7 @@ vi.mock("@/lib/supabase/admin", () => ({
 vi.mock("@/services/polar", () => ({
   fetchSubscription: mocks.fetchSubscription,
   fetchCustomerSubscription: mocks.fetchCustomerSubscription,
+  fetchCheckout: mocks.fetchCheckout,
 }));
 
 import { UnauthorizedError } from "@/lib/supabase/session";
@@ -87,6 +90,18 @@ function setupAdminSupabase() {
   });
 }
 
+function request(body?: unknown): NextRequest {
+  return new NextRequest("http://localhost:3000/api/billing/sync", {
+    method: "POST",
+    ...(body === undefined
+      ? {}
+      : {
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }),
+  });
+}
+
 beforeEach(() => {
   for (const m of Object.values(mocks)) m.mockReset();
 
@@ -105,6 +120,130 @@ beforeEach(() => {
   setupAdminSupabase();
 });
 
+// 첫 결제 직후에는 profiles의 polar_* 가 전부 비어 있다. 그 값은 웹훅이
+// 채우기 때문이다. 그래서 복귀 URL로 받은 checkoutId 가 유일한 실마리다.
+describe("POST /api/billing/sync — 첫 결제(checkoutId)", () => {
+  beforeEach(() => {
+    mocks.fetchCheckout.mockResolvedValue({
+      status: "succeeded",
+      customerId: "cus-1",
+      subscriptionId: null,
+      userId: "uid-1",
+    });
+    mocks.fetchCustomerSubscription.mockResolvedValue({
+      subscriptionId: "sub-1",
+      status: "trialing",
+      currentPeriodEnd: "2026-08-23T07:33:26.163Z",
+    });
+  });
+
+  it("polar_* 가 전부 비어 있어도 체크아웃으로 Pro가 된다", async () => {
+    mocks.getEffectiveTier.mockResolvedValue("pro");
+
+    const res = await POST(request({ checkoutId: "chk-1" }));
+    const json = (await res.json()) as { tier: string };
+
+    expect(mocks.fetchCheckout).toHaveBeenCalledWith("chk-1");
+    expect(json.tier).toBe("pro");
+    expect(adminUpdates[0]).toMatchObject({
+      tier: "pro",
+      subscription_status: "trialing",
+      current_period_end: "2026-08-23T07:33:26.163Z",
+      polar_subscription_id: "sub-1",
+    });
+  });
+
+  it("웹훅이 채우던 고객 ID도 함께 기록한다", async () => {
+    await POST(request({ checkoutId: "chk-1" }));
+
+    expect(adminUpdates[0]).toMatchObject({ polar_customer_id: "cus-1" });
+  });
+
+  // 여기가 뚫리면 남의 체크아웃 ID를 주워 자기 계정을 Pro로 만들 수 있다.
+  it("남의 체크아웃이면 403이고 아무것도 갱신하지 않는다", async () => {
+    mocks.fetchCheckout.mockResolvedValue({
+      status: "succeeded",
+      customerId: "cus-9",
+      subscriptionId: "sub-9",
+      userId: "attacker-victim-uid",
+    });
+
+    const res = await POST(request({ checkoutId: "chk-9" }));
+
+    expect(res.status).toBe(403);
+    expect(adminUpdates).toHaveLength(0);
+    expect(mocks.fetchCustomerSubscription).not.toHaveBeenCalled();
+  });
+
+  it("소유자를 알 수 없는 체크아웃도 거부한다", async () => {
+    mocks.fetchCheckout.mockResolvedValue({
+      status: "succeeded",
+      customerId: "cus-9",
+      subscriptionId: null,
+      userId: null,
+    });
+
+    const res = await POST(request({ checkoutId: "chk-9" }));
+
+    expect(res.status).toBe(403);
+    expect(adminUpdates).toHaveLength(0);
+  });
+
+  it("아직 결제가 끝나지 않았으면 갱신하지 않는다", async () => {
+    mocks.fetchCheckout.mockResolvedValue({
+      status: "open",
+      customerId: null,
+      subscriptionId: null,
+      userId: "uid-1",
+    });
+
+    const res = await POST(request({ checkoutId: "chk-1" }));
+
+    expect(res.status).toBe(200);
+    expect(adminUpdates).toHaveLength(0);
+  });
+
+  it("구독 ID가 실려 오면 그것으로 바로 조회한다", async () => {
+    mocks.fetchCheckout.mockResolvedValue({
+      status: "succeeded",
+      customerId: "cus-1",
+      subscriptionId: "sub-1",
+      userId: "uid-1",
+    });
+    mocks.fetchSubscription.mockResolvedValue({
+      status: "active",
+      currentPeriodEnd: "2026-09-30T00:00:00.000Z",
+    });
+
+    await POST(request({ checkoutId: "chk-1" }));
+
+    expect(mocks.fetchSubscription).toHaveBeenCalledWith("sub-1");
+    expect(mocks.fetchCustomerSubscription).not.toHaveBeenCalled();
+  });
+
+  it("체크아웃 조회가 실패해도 500으로 무너지지 않는다", async () => {
+    mocks.fetchCheckout.mockRejectedValue(new Error("polar down"));
+
+    const res = await POST(request({ checkoutId: "chk-1" }));
+
+    expect(res.status).toBe(200);
+  });
+
+  it("본문이 없어도 기존 경로가 그대로 동작한다", async () => {
+    profileRow.polar_subscription_id = "sub-1";
+    mocks.fetchSubscription.mockResolvedValue({
+      status: "active",
+      currentPeriodEnd: "2026-09-30T00:00:00.000Z",
+    });
+
+    const res = await POST(request());
+
+    expect(res.status).toBe(200);
+    expect(mocks.fetchCheckout).not.toHaveBeenCalled();
+    expect(mocks.fetchSubscription).toHaveBeenCalledWith("sub-1");
+  });
+});
+
 describe("POST /api/billing/sync", () => {
   it("GET을 노출하지 않는다 — 상태를 바꾸므로 프리페치가 실행하면 안 된다", () => {
     expect((route as Record<string, unknown>).GET).toBeUndefined();
@@ -114,7 +253,7 @@ describe("POST /api/billing/sync", () => {
   it("미인증이면 401이고 Polar를 조회하지 않는다", async () => {
     mocks.requireUser.mockRejectedValue(new UnauthorizedError());
 
-    const res = await POST();
+    const res = await POST(request());
 
     expect(res.status).toBe(401);
     expect(mocks.fetchSubscription).not.toHaveBeenCalled();
@@ -129,7 +268,7 @@ describe("POST /api/billing/sync", () => {
     });
     mocks.getEffectiveTier.mockResolvedValue("pro");
 
-    const res = await POST();
+    const res = await POST(request());
     const json = (await res.json()) as {
       tier: string;
       currentPeriodEnd: string | null;
@@ -154,7 +293,7 @@ describe("POST /api/billing/sync", () => {
       currentPeriodEnd: "2026-09-30T00:00:00.000Z",
     });
 
-    await POST();
+    await POST(request());
 
     expect(mocks.fetchCustomerSubscription).toHaveBeenCalledWith("cus-1");
     expect(mocks.fetchSubscription).not.toHaveBeenCalled();
@@ -164,7 +303,7 @@ describe("POST /api/billing/sync", () => {
   it("Polar 식별자가 하나도 없으면 갱신하지 않고 현재 상태를 반환한다", async () => {
     profileRow.current_period_end = null;
 
-    const res = await POST();
+    const res = await POST(request());
     const json = (await res.json()) as { tier: string };
 
     expect(json.tier).toBe("free");
@@ -179,7 +318,7 @@ describe("POST /api/billing/sync", () => {
       currentPeriodEnd: "2026-01-31T00:00:00.000Z",
     });
 
-    const res = await POST();
+    const res = await POST(request());
     const json = (await res.json()) as { tier: string };
 
     expect(adminUpdates).toHaveLength(0);
@@ -194,7 +333,7 @@ describe("POST /api/billing/sync", () => {
       currentPeriodEnd: "2026-09-30T00:00:00.000Z",
     });
 
-    await POST();
+    await POST(request());
 
     expect(adminTables).toEqual(["profiles"]);
     expect(adminEqCalls).toEqual([["id", "uid-1"]]);
@@ -217,7 +356,7 @@ describe("POST /api/billing/sync", () => {
     profileRow.polar_subscription_id = "sub-1";
     mocks.fetchSubscription.mockRejectedValue(new Error("polar down"));
 
-    const res = await POST();
+    const res = await POST(request());
     const json = (await res.json()) as { tier: string };
 
     expect(res.status).toBe(200);

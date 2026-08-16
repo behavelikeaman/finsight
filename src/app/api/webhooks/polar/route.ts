@@ -13,7 +13,10 @@
  * 웹훅에는 사용자 세션이 없으므로 service role 클라이언트를 쓴다.
  * 이 라우트와 billing/sync 외의 어떤 파일에서도 admin을 import 하지 마라.
  */
-import { validateEvent } from "@polar-sh/sdk/webhooks";
+import {
+  WebhookVerificationError,
+  validateEvent,
+} from "@polar-sh/sdk/webhooks";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { isEntitledStatus } from "@/lib/entitlement";
@@ -38,12 +41,29 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     headers[key] = value;
   });
 
+  // 시크릿 미설정은 서버 설정 오류다. 401을 주면 Polar가 인증 실패로 보고
+  // 재시도를 멈춘다. 5xx여야 설정을 고친 뒤 재전송이 살아난다.
+  let secret: string;
+  try {
+    secret = serverEnv("POLAR_WEBHOOK_SECRET");
+  } catch (err) {
+    console.error("[webhooks/polar] POLAR_WEBHOOK_SECRET 미설정", err);
+    return NextResponse.json({ ok: false }, { status: 500 });
+  }
+
   let event: unknown;
   try {
-    event = validateEvent(body, headers, serverEnv("POLAR_WEBHOOK_SECRET"));
-  } catch {
-    // 위조·변조·시크릿 미설정 — 어느 쪽이든 처리하지 않는다.
-    return NextResponse.json({ ok: false }, { status: 401 });
+    event = validateEvent(body, headers, secret);
+  } catch (err) {
+    // 두 실패를 가른다. 뭉뚱그리면 페이로드 문제를 "시크릿이 틀렸다"로
+    // 오진하게 된다 — 실제로 그렇게 한참을 헤맸다.
+    if (err instanceof WebhookVerificationError) {
+      console.error("[webhooks/polar] 서명 검증 실패", err.message);
+      return NextResponse.json({ ok: false }, { status: 401 });
+    }
+
+    console.error("[webhooks/polar] 페이로드 파싱 실패", err);
+    return NextResponse.json({ ok: false }, { status: 400 });
   }
 
   const subscription = subscriptionFromEvent(event);

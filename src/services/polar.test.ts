@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   subscriptionsGet: vi.fn(),
   subscriptionsList: vi.fn(),
   customerSessionsCreate: vi.fn(),
+  checkoutsGet: vi.fn(),
 }));
 
 vi.mock("@polar-sh/sdk", () => ({
@@ -15,6 +16,7 @@ vi.mock("@polar-sh/sdk", () => ({
 import {
   createCheckout,
   createCustomerPortalSession,
+  fetchCheckout,
   fetchCustomerSubscription,
   fetchSubscription,
 } from "./polar";
@@ -27,9 +29,10 @@ beforeEach(() => {
   mocks.subscriptionsGet.mockReset();
   mocks.subscriptionsList.mockReset();
   mocks.customerSessionsCreate.mockReset();
+  mocks.checkoutsGet.mockReset();
 
   mocks.PolarCtor.mockImplementation(() => ({
-    checkouts: { create: mocks.checkoutsCreate },
+    checkouts: { create: mocks.checkoutsCreate, get: mocks.checkoutsGet },
     subscriptions: { get: mocks.subscriptionsGet, list: mocks.subscriptionsList },
     customerSessions: { create: mocks.customerSessionsCreate },
   }));
@@ -196,6 +199,57 @@ describe("fetchCustomerSubscription", () => {
     mocks.subscriptionsList.mockResolvedValue({ result: { items: [] } });
 
     expect(await fetchCustomerSubscription("cus-1")).toBeNull();
+  });
+});
+
+describe("fetchCheckout", () => {
+  it("결제 상태와 고객·구독·소유자를 반환한다", async () => {
+    mocks.checkoutsGet.mockResolvedValue({
+      id: "chk-1",
+      status: "succeeded",
+      customerId: "cus-1",
+      subscriptionId: "sub-1",
+      metadata: { userId: "uid-1" },
+    });
+
+    const result = await fetchCheckout("chk-1");
+
+    expect(mocks.checkoutsGet).toHaveBeenCalledWith({ id: "chk-1" });
+    expect(result).toEqual({
+      status: "succeeded",
+      customerId: "cus-1",
+      subscriptionId: "sub-1",
+      userId: "uid-1",
+    });
+  });
+
+  // 첫 결제에서는 subscriptionId가 아직 비어 온다. 실제로 그랬다.
+  it("구독 ID가 아직 없으면 null로 준다", async () => {
+    mocks.checkoutsGet.mockResolvedValue({
+      id: "chk-1",
+      status: "succeeded",
+      customerId: "cus-1",
+      subscriptionId: null,
+      metadata: { userId: "uid-1" },
+    });
+
+    const result = await fetchCheckout("chk-1");
+
+    expect(result).toMatchObject({ subscriptionId: null, customerId: "cus-1" });
+  });
+
+  // metadata는 문자열이 아닌 값도 담을 수 있다. 그대로 신뢰해 비교하면
+  // 소유자 검증이 엉뚱하게 통과할 수 있다.
+  it("metadata.userId가 문자열이 아니면 null로 준다", async () => {
+    mocks.checkoutsGet.mockResolvedValue({
+      id: "chk-1",
+      status: "succeeded",
+      customerId: "cus-1",
+      subscriptionId: null,
+      metadata: { userId: 42 },
+    });
+
+    expect(await fetchCheckout("chk-1")).toMatchObject({ userId: null });
   });
 });
 

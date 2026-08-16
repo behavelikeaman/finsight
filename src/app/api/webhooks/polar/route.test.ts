@@ -6,13 +6,18 @@ const mocks = vi.hoisted(() => ({
   createAdminSupabase: vi.fn(),
 }));
 
-vi.mock("@polar-sh/sdk/webhooks", () => ({
-  validateEvent: mocks.validateEvent,
-}));
+// WebhookVerificationError 는 실제 클래스를 쓴다. 라우트가 이 타입으로
+// "서명이 틀림"과 "페이로드를 못 읽음"을 가르기 때문이다.
+vi.mock("@polar-sh/sdk/webhooks", async (importActual) => {
+  const actual = await importActual<typeof import("@polar-sh/sdk/webhooks")>();
+  return { ...actual, validateEvent: mocks.validateEvent };
+});
 
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminSupabase: mocks.createAdminSupabase,
 }));
+
+import { WebhookVerificationError } from "@polar-sh/sdk/webhooks";
 
 import { POST } from "./route";
 
@@ -98,7 +103,7 @@ afterEach(() => {
 describe("POST /api/webhooks/polar — 서명 검증", () => {
   it("서명이 틀리면 401이고 DB 갱신이 일어나지 않는다", async () => {
     mocks.validateEvent.mockImplementation(() => {
-      throw new Error("invalid signature");
+      throw new WebhookVerificationError("invalid signature");
     });
 
     const res = await POST(request());
@@ -108,12 +113,28 @@ describe("POST /api/webhooks/polar — 서명 검증", () => {
     expect(adminUpdates).toHaveLength(0);
   });
 
-  it("검증이 이벤트 처리보다 먼저다 — 시크릿이 없으면 401", async () => {
+  // 401로 뭉뚱그리면 "시크릿이 틀렸다"고 오진하게 된다. 실제로 그렇게
+  // 한참을 헤맸다 — 서명은 맞았고 페이로드 스키마가 어긋난 것이었다.
+  it("서명은 맞고 페이로드를 못 읽으면 400으로 구분한다", async () => {
+    mocks.validateEvent.mockImplementation(() => {
+      throw new Error("Failed to parse event: timestamp Required");
+    });
+
+    const res = await POST(request());
+
+    expect(res.status).toBe(400);
+    expect(adminUpdates).toHaveLength(0);
+  });
+
+  it("검증이 이벤트 처리보다 먼저다 — 시크릿이 없으면 500이고 처리하지 않는다", async () => {
     delete process.env.POLAR_WEBHOOK_SECRET;
 
     const res = await POST(request());
 
-    expect(res.status).toBe(401);
+    // 서버 설정 오류다. 401을 주면 Polar가 인증 실패로 보고 재시도를
+    // 멈춘다. 5xx여야 설정을 고친 뒤 재전송이 살아난다.
+    expect(res.status).toBe(500);
+    expect(mocks.validateEvent).not.toHaveBeenCalled();
     expect(mocks.createAdminSupabase).not.toHaveBeenCalled();
   });
 

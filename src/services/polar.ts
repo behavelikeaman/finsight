@@ -44,6 +44,40 @@ export async function createCheckout(params: {
   return { url: checkout.url };
 }
 
+interface CheckoutState {
+  status: string;
+  customerId: string | null;
+  /** 첫 결제 직후에는 아직 비어 있을 수 있다. */
+  subscriptionId: string | null;
+  /** 체크아웃을 만든 사용자. 소유자 검증의 근거다. */
+  userId: string | null;
+}
+
+/**
+ * 체크아웃 하나를 조회한다.
+ *
+ * 결제 복귀 직후에는 profiles에 polar_* 가 아직 비어 있다 — 그 값은 웹훅이
+ * 채우기 때문이다. 그래서 첫 결제는 체크아웃 자체를 근거로 삼아야 한다.
+ *
+ * userId는 우리가 createCheckout에서 심은 metadata다. 호출부는 이 값이 세션
+ * 사용자와 같은지 반드시 확인해야 한다 — 확인 없이 쓰면 남의 체크아웃 ID로
+ * 자기 계정을 Pro로 만들 수 있다.
+ */
+export async function fetchCheckout(
+  checkoutId: string,
+): Promise<CheckoutState> {
+  const checkout = await getClient().checkouts.get({ id: checkoutId });
+
+  const userId = checkout.metadata?.["userId"];
+
+  return {
+    status: checkout.status,
+    customerId: checkout.customerId ?? null,
+    subscriptionId: checkout.subscriptionId ?? null,
+    userId: typeof userId === "string" && userId !== "" ? userId : null,
+  };
+}
+
 /**
  * 고객 포털 세션을 만든다. 반환 URL에는 1회용 토큰이 박혀 있다.
  *
