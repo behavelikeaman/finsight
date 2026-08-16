@@ -40,6 +40,23 @@ const CONTROL_CLASS =
   "rounded-md border border-muted-soft bg-canvas px-2 py-1 text-xs text-ink " +
   "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-primary";
 
+interface RuleEdit {
+  id: string;
+  merchant: string;
+  classification: Classification;
+  accountCode: AccountCode | null;
+}
+
+/**
+ * 수정은 곧바로 저장하고, 규칙 등록은 그 뒤에 제안한다.
+ *
+ * 저장 전에 확인 대화상자를 띄우면 확인 필요 건을 연달아 고칠 때마다 흐름이
+ * 끊긴다. 규칙은 사용자가 원할 때만 한 번 더 누르면 된다.
+ */
+type Notice =
+  | { kind: "rule-offer"; text: string; edit: RuleEdit }
+  | { kind: "message"; text: string };
+
 export function TransactionTable({
   analysisId,
   rows,
@@ -49,7 +66,7 @@ export function TransactionTable({
 }: TransactionTableProps) {
   const [prevRows, setPrevRows] = useState(rows);
   const [localRows, setLocalRows] = useState(rows);
-  const [toast, setToast] = useState<string | null>(null);
+  const [notice, setNotice] = useState<Notice | null>(null);
 
   // 부모(Server Component)가 router.refresh()로 새 데이터를 내려주면 동기화한다.
   // React 권장 패턴: effect가 아니라 렌더 중에 prop 변화를 감지해 state를 조정한다.
@@ -59,10 +76,38 @@ export function TransactionTable({
   }
 
   useEffect(() => {
-    if (!toast) return;
-    const timer = setTimeout(() => setToast(null), 4000);
+    // 규칙 제안은 시간이 지나도 지우지 않는다. 놓치면 규칙이 저장되지 않고,
+    // 규칙 학습이 없으면 다음 달에도 같은 거래를 AI로 다시 분류하게 된다.
+    // 다음 수정이 들어오면 새 제안으로 교체되고, 닫기로도 없앨 수 있다.
+    if (!notice || notice.kind === "rule-offer") return;
+    const timer = setTimeout(() => setNotice(null), 4000);
     return () => clearTimeout(timer);
-  }, [toast]);
+  }, [notice]);
+
+  const save = async (edit: RuleEdit, saveAsRule: boolean): Promise<boolean> => {
+    try {
+      const body: CorrectionsRequest = {
+        edits: [
+          {
+            id: edit.id,
+            classification: edit.classification,
+            accountCode: edit.accountCode,
+          },
+        ],
+        saveAsRule,
+      };
+      const res = await fetch(`/api/analyses/${analysisId}/transactions`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const json = (await res.json()) as CorrectionsResponse | { ok: false };
+
+      return json.ok;
+    } catch {
+      return false;
+    }
+  };
 
   const handleChange = async (
     id: string,
@@ -89,33 +134,35 @@ export function TransactionTable({
       ),
     );
 
-    const saveAsRule = window.confirm(
-      `'${target.merchant}'는 앞으로도 이렇게 분류할까요?`,
-    );
+    const edit: RuleEdit = {
+      id,
+      merchant: target.merchant,
+      classification,
+      accountCode: normalizedAccountCode,
+    };
 
-    try {
-      const body: CorrectionsRequest = {
-        edits: [{ id, classification, accountCode: normalizedAccountCode }],
-        saveAsRule,
-      };
-      const res = await fetch(`/api/analyses/${analysisId}/transactions`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const json = (await res.json()) as CorrectionsResponse | { ok: false };
-
-      if (!json.ok) throw new Error("저장 실패");
-
-      if (saveAsRule) {
-        setToast(
-          `'${target.merchant}' → ${CLASSIFICATION_LABEL[classification]}으로 앞으로 자동 분류됩니다`,
-        );
-      }
-    } catch {
+    if (!(await save(edit, false))) {
       setLocalRows(previous);
-      setToast("저장에 실패했습니다. 다시 시도해 주세요.");
+      setNotice({ kind: "message", text: "저장에 실패했습니다. 다시 시도해 주세요." });
+      return;
     }
+
+    setNotice({
+      kind: "rule-offer",
+      text: `'${target.merchant}' → ${CLASSIFICATION_LABEL[classification]}로 저장했습니다.`,
+      edit,
+    });
+  };
+
+  const handleSaveRule = async (edit: RuleEdit) => {
+    const ok = await save(edit, true);
+
+    setNotice({
+      kind: "message",
+      text: ok
+        ? `'${edit.merchant}'는 앞으로 ${CLASSIFICATION_LABEL[edit.classification]}로 자동 분류됩니다`
+        : "규칙 저장에 실패했습니다. 다시 시도해 주세요.",
+    });
   };
 
   if (localRows.length === 0) {
@@ -128,15 +175,35 @@ export function TransactionTable({
     <div className="flex flex-col gap-2">
       {/* 규칙 학습·저장 실패는 화면에만 뜨면 낭독기 사용자에게 전달되지 않는다.
           role="status"는 진행 중인 작업을 끊지 않고 알린다. */}
-      <p
+      <div
         role="status"
         aria-live="polite"
         className={
-          toast ? "rounded-md bg-surface-strong px-4 py-2 text-sm text-ink" : "sr-only"
+          notice
+            ? "flex flex-wrap items-center gap-3 rounded-md bg-surface-strong px-4 py-2 text-sm text-ink"
+            : "sr-only"
         }
       >
-        {toast}
-      </p>
+        {notice && <span>{notice.text}</span>}
+        {notice?.kind === "rule-offer" && (
+          <>
+            <button
+              type="button"
+              onClick={() => void handleSaveRule(notice.edit)}
+              className="rounded-full border border-muted-soft px-3 py-1 text-xs font-medium text-ink focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-primary"
+            >
+              앞으로도 이렇게 분류
+            </button>
+            <button
+              type="button"
+              onClick={() => setNotice(null)}
+              className="text-xs text-muted underline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-primary"
+            >
+              닫기
+            </button>
+          </>
+        )}
+      </div>
       <table className="w-full border-collapse text-sm">
         <caption className="sr-only">{caption}</caption>
         <thead>

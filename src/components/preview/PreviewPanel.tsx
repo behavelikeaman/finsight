@@ -8,6 +8,7 @@
  * 뒤, 결과 행은 브라우저 Supabase 클라이언트로 직접 조회한다(RLS가
  * owner_id=auth.uid()로 막아준다). 새 읽기 API 라우트를 만들지 않는다.
  */
+import Link from "next/link";
 import { useEffect, useState } from "react";
 
 import { createBrowserSupabase } from "@/lib/supabase/browser";
@@ -167,8 +168,9 @@ export function PreviewPanel({
 
       {state.kind === "sample_used" && (
         <p className="text-sm text-body">
-          이 계정의 표본 분류는 이미 사용했습니다. Google 계정을 연결하면
-          전체 {rowCount}건을 분류합니다.
+          {isAnonymous
+            ? `이 계정의 표본 분류는 이미 사용했습니다. Google 계정을 연결하면 전체 ${rowCount}건을 분류합니다.`
+            : `표본 분류는 이미 사용했습니다. 전체 ${rowCount}건은 아래에서 분류합니다.`}
         </p>
       )}
 
@@ -207,16 +209,35 @@ export function PreviewPanel({
 
           <p className="text-sm text-muted">
             상위 {sampleCount}건을 분류했습니다. 나머지 {remaining}건은
-            Google 계정을 연결하면 분류합니다.
+            {isAnonymous
+              ? " Google 계정을 연결하면 분류합니다."
+              : " 아래에서 분류합니다."}
           </p>
         </div>
       )}
 
-      <ConnectPanel
-        isAnonymous={isAnonymous}
-        hasPendingAnalysis={true}
-        redirectTo={redirectTo}
-      />
+      {/* 이미 연결을 마친 사용자에게 연결을 다시 권하지 않는다. 매달 명세서를
+          올리는 재방문자가 이 제품의 주 사용자다. */}
+      {isAnonymous ? (
+        <ConnectPanel
+          isAnonymous={isAnonymous}
+          hasPendingAnalysis={true}
+          redirectTo={redirectTo}
+        />
+      ) : (
+        <div className="flex flex-col items-start gap-3 rounded-2xl border border-hairline bg-surface-soft p-6">
+          <p className="text-sm text-body">
+            전체 {rowCount}건을 분류하고 결과를 수정하려면 분석 화면으로
+            이동하세요.
+          </p>
+          <Link
+            href={`/dashboard/${analysisId}`}
+            className="rounded-full bg-primary px-5 py-2.5 text-sm font-medium text-on-primary"
+          >
+            전체 분류하러 가기
+          </Link>
+        </div>
+      )}
 
       <p className="rounded-md bg-surface-soft px-4 py-3 text-xs text-muted">
         이 결과는 세무 조언이 아닙니다. 최종 판단은 세무 대리인과 상의하세요.
