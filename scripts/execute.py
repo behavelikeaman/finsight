@@ -66,6 +66,10 @@ class StepExecutor:
     """Phase 디렉토리 안의 step들을 순차 실행하는 하네스."""
 
     MAX_RETRIES = 3
+    CLAUDE_TIMEOUT = 14400  # 4시간. product-ui급 대형 step은 1800s(30분)로는 부족했다.
+    # 모델을 고정하지 않으면 CLI 기본값을 타서 step마다 다른 모델로 돈다.
+    # 0-mvp에서 step 5(110턴, 가장 무거운 step)만 sonnet-5로 실행됐다.
+    MODEL = "claude-opus-5"
     FEAT_MSG = "feat({phase}): step {num} — {name}"
     CHORE_MSG = "chore({phase}): step {num} output"
     TZ = timezone(timedelta(hours=9))
@@ -94,6 +98,7 @@ class StepExecutor:
 
     def run(self):
         self._print_header()
+        self._check_clean_tree()
         self._check_blockers()
         self._checkout_branch()
         guardrails = self._load_guardrails()
@@ -120,7 +125,10 @@ class StepExecutor:
 
     def _run_git(self, *args) -> subprocess.CompletedProcess:
         cmd = ["git"] + list(args)
-        return subprocess.run(cmd, cwd=self._root, capture_output=True, text=True)
+        return subprocess.run(
+            cmd, cwd=self._root, capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+        )
 
     def _checkout_branch(self):
         branch = f"feat-{self._phase_name}"
@@ -250,12 +258,27 @@ class StepExecutor:
         # 프롬프트는 argv가 아니라 stdin으로 넘긴다.
         # Windows의 argv 상한은 32767자인데 가드레일(CLAUDE.md + docs/*.md)만
         # 50KB가 넘어서, argv로 넘기면 WinError 206으로 즉사한다.
-        result = subprocess.run(
-            ["claude", "-p", "--dangerously-skip-permissions", "--output-format", "json"],
-            input=prompt,
-            cwd=self._root, capture_output=True, text=True, timeout=1800,
-            encoding="utf-8", errors="replace",
-        )
+        try:
+            result = subprocess.run(
+                ["claude", "-p", "--model", self.MODEL,
+                 "--dangerously-skip-permissions", "--output-format", "json"],
+                input=prompt,
+                cwd=self._root, capture_output=True, text=True, timeout=self.CLAUDE_TIMEOUT,
+                encoding="utf-8", errors="replace",
+            )
+        except subprocess.TimeoutExpired as e:
+            # 타임아웃을 그대로 올리면 재시도 로직을 못 타고 프로세스 전체가 죽는다.
+            # 호출부가 index.json 상태로 성패를 판단하므로, 실패로 보이게 결과만 반환한다.
+            print(f"\n  WARN: Claude 호출이 시간 초과됨 ({self.CLAUDE_TIMEOUT}s)")
+            output = {
+                "step": step_num, "name": step_name,
+                "exitCode": -1,
+                "stdout": e.stdout or "", "stderr": (e.stderr or "") + f"\n[timeout after {self.CLAUDE_TIMEOUT}s]",
+            }
+            out_path = self._phase_dir / f"step{step_num}-output.json"
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(output, f, indent=2, ensure_ascii=False)
+            return output
 
         if result.returncode != 0:
             print(f"\n  WARN: Claude가 비정상 종료됨 (code {result.returncode})")
@@ -282,6 +305,30 @@ class StepExecutor:
         if self._auto_push:
             print(f"  Auto-push: enabled")
         print(f"{'='*60}")
+
+    def _check_clean_tree(self):
+        """더러운 작업 트리에서 시작하지 않는다.
+
+        _commit_step이 `git add -A`로 전부 스테이징하므로, 시작 시점에 남아 있던
+        미커밋 변경은 첫 step의 feat 커밋에 그대로 섞여 들어간다.
+        git이 없거나 repo가 아닌 경우의 진단은 _checkout_branch가 담당한다.
+        """
+        r = self._run_git("status", "--porcelain")
+        if r.returncode != 0:
+            return
+
+        dirty = [line for line in r.stdout.splitlines() if line.strip()]
+        if not dirty:
+            return
+
+        print(f"\n  ERROR: 커밋되지 않은 변경이 있습니다 ({len(dirty)}개).")
+        for line in dirty[:10]:
+            print(f"    {line}")
+        if len(dirty) > 10:
+            print(f"    ... 외 {len(dirty) - 10}개")
+        print(f"  step 커밋은 `git add -A`로 전부 담기 때문에 이 변경들이 함께 커밋됩니다.")
+        print(f"  Hint: commit 하거나 stash한 후 다시 실행하세요.")
+        sys.exit(1)
 
     def _check_blockers(self):
         index = self._read_json(self._index_file)
@@ -397,6 +444,18 @@ class StepExecutor:
 
     def _finalize(self):
         index = self._read_json(self._index_file)
+
+        # 모든 step이 completed일 때만 phase를 완료로 마킹한다.
+        # 예전에는 "pending이 없으면 끝"으로 봤는데, 나중에 step을 추가하는 실사용
+        # 패턴에서 phase가 조기에 completed로 찍히고 completed_at이 스테일해졌다.
+        incomplete = [s for s in index["steps"] if s.get("status") != "completed"]
+        if incomplete:
+            if index.pop("completed_at", None) is not None:
+                self._write_json(self._index_file, index)
+            detail = ", ".join(f"step {s['step']}({s.get('status', 'pending')})" for s in incomplete)
+            print(f"\n  Phase '{self._phase_name}' 미완료 — 완료 처리하지 않습니다: {detail}")
+            return
+
         index["completed_at"] = self._stamp()
         self._write_json(self._index_file, index)
         self._update_top_index("completed")

@@ -12,15 +12,22 @@
   --color-surface-soft: #f7f7f7;
   --color-surface-strong: #eef0f3;
 
-  /* 경계선 */
+  /* 경계선 — 카드 테두리와 표 구분선. 장식이라 WCAG 3:1 대상이 아니다.
+     폼 컨트롤 테두리에는 쓰지 마라. 그건 컴포넌트를 식별하는 요소라
+     3:1이 필요하고, --color-muted-soft를 쓴다. */
   --color-hairline: #dee1e6;
   --color-hairline-soft: #eef0f3;
 
   /* 텍스트 */
   --color-ink: #0a0b0d;
   --color-body: #5b616e;
-  --color-muted: #7c828a;
-  --color-muted-soft: #a8acb3;
+  /* 표 헤더·확신도·고지 문구에 쓰이는 정보성 텍스트라 WCAG AA(4.5:1)를 지킨다.
+     원본 토큰 #7c828a는 흰 배경 3.88:1로 미달이었다.
+     현재 값은 canvas 5.15 / surface-soft 4.80 / review-soft 4.70. */
+  --color-muted: #686e76;
+  /* 텍스트가 아닌 보조 요소 전용 — 폼 컨트롤 테두리, 차트 축선.
+     비텍스트 기준 3:1을 지킨다(흰 배경 3.18). 원본 #a8acb3은 2.28로 미달이었다. */
+  --color-muted-soft: #8b9199;
   --color-on-primary: #ffffff;
 
   /* 포인트 컬러 1가지 */
@@ -31,10 +38,16 @@
   /* 분류 상태 3색. 색은 분류 상태에만 쓴다. */
   --color-business: #05b169;
   --color-business-soft: #e6f7f0;
+  /* 채우기용 초록(#05b169)은 연한 배경 위에서 2.52:1이라 글자로 쓸 수 없다.
+     배지처럼 글자에 쓸 때는 이 값을 쓴다(business-soft 위 5.95:1). */
+  --color-business-ink: #056b3f;
   --color-personal: #7c828a;
   --color-personal-soft: #f0f1f3;
   --color-review: #f4b000;
   --color-review-soft: #fdf4e0;
+  /* 채우기용 노랑(#f4b000)은 연한 배경 위에서 1.74:1이라 글자로 쓸 수 없다.
+     배지처럼 글자에 쓸 때는 이 값을 쓴다(review-soft 위 4.97:1). */
+  --color-review-ink: #8a6300;
 }
 
 html {
@@ -45,4 +58,16 @@ body {
   background-color: var(--color-canvas);
   color: var(--color-ink);
   font-family: var(--font-sans);
+}
+
+/* 인쇄 — 세무 대리인에게 넘기는 종이가 실제 산출물이다.
+   헤더·고지 바·툴바를 숨기고, 확인필요 행 배경을 흰색으로 되돌린다. */
+@media print {
+  .no-print {
+    display: none !important;
+  }
+
+  .review-row {
+    background-color: var(--color-canvas) !important;
+  }
 }

@@ -19,87 +19,51 @@
     {
       "step": 2,
       "name": "file-ingest",
-      "status": "pending"
+      "status": "completed",
+      "started_at": "2026-08-15T18:28:11+0900",
+      "summary": "src/lib/ingest/ 생성 — ingestFile(buffer, fileName, {maxRows?}): Promise<IngestResult{table,skippedPreambleRows,droppedTotalRows}> · detectSourceKind(fileName): SourceKind · decodeText(buffer)(UTF-8 BOM→fatal UTF-8→EUC-KR 폴백) · parseCsv(text)(따옴표·필드 내 쉼표/줄바꿈/\"\" 이스케이프 직접 구현) · parseXlsx(buffer)(ExcelJS 동적 import, 첫 시트, 날짜→YYYY-MM-DD) · findHeaderRow/dropTotalRows(안내문·합계 행 제거). 상한은 tier.ts의 MAX_ROWS를 import해 초과 시 throw(잘라내지 않음). __fixtures__ 8종(UTF-8·EUC-KR·안내문·합계·안내문+합계·따옴표·xlsx·빈 파일/0건, 바이너리는 테스트에서 생성) + 테스트 49개. lint/build/test 통과.",
+      "completed_at": "2026-08-15T18:36:28+0900"
     },
     {
       "step": 3,
-      "name": "column-mapping",
-      "status": "pending"
+      "name": "core-lib",
+      "status": "completed",
+      "started_at": "2026-08-15T18:51:22+0900",
+      "summary": "src/lib/{mapping,analysis}/ + redact.ts 생성(전부 I/O 없는 순수 함수). mapping: guessMapping(headers, rows?)(별칭 사전 + 원화·청구 우선, 카드번호 컬럼 제외, 값 패턴 폴백)·validateMapping(missing/unparsable, 상위 20행 실패율 50% 초과)·normalizeRows(행 단위 skip, 최빈 연도 fallback, 날짜·가맹점·금액 3필드만)·parseAmountKrw(₩/천단위/원/음수/괄호/소수부, parseFloat 미사용)·parseDate(6포맷). analysis: summarize(정수 누적, YYYY-MM 오름차순, 상위 10 가맹점, 지점 표기 보존)·computeFingerprint(정렬 후 sha256, crypto.subtle이라 Promise<string>)·bucketByClassification(CONFIDENCE_THRESHOLD import, isUserEdited 예외, review·unclassified는 합계 제외)·pickSample(금액 절대값 내림차순, id 보존). redact.ts: redactMerchant/redactRows — [RRN]·[PHONE]·[CARD]·[ACCT]·[NAME] 토큰 치환, removedCount 집계, RedactedRow 캐스팅 단일 지점, 이마트24·GS25 등 정상 상호 보존. 테스트 95개 추가(전체 150개), lint/build/test 통과.",
+      "completed_at": "2026-08-15T19:02:39+0900"
     },
     {
       "step": 4,
-      "name": "analysis-engine",
-      "status": "pending"
+      "name": "data-and-auth",
+      "status": "completed",
+      "started_at": "2026-08-15T19:06:49+0900",
+      "summary": "supabase/migrations/0001_initial.sql — 테이블 5개(profiles·analyses·user_rules·transactions·usage_counters, amount_krw bigint, account_code 12종 check, unique(owner_id,fingerprint)·(owner_id,merchant_pattern), 인덱스 3개) + auth.users INSERT 트리거(handle_new_user → profiles tier='free') + security definer 함수 3개(effective_tier(uid)·increment_usage(kind)(uid·period 인자 없음, auth.uid()+서버시각)·mark_sample_used()) + RLS 5개 테이블 차등(analyses·transactions·user_rules 전체 CRUD with check, profiles SELECT+제한 UPDATE와 tier·current_period_end·sample_used·polar_* revoke, usage_counters SELECT 정책만 + insert/update/delete revoke). 래퍼 src/lib/supabase/{browser,server,admin}.ts(admin은 웹훅 전용 주석 + serverEnv 호출시점 읽기). 인증 src/lib/supabase/auth.ts(decideAuthRoute·ensureSession·isAnonymousUser)와 session.ts(getCurrentUser·requireUser·getEffectiveTier RPC·UnauthorizedError), src/middleware.ts(getUser로 세션 갱신 + 응답에 쿠키 재심기, 익명 로그인 없음). 테스트 39개 추가(전체 189개), lint/build/test 통과.",
+      "completed_at": "2026-08-15T19:13:01+0900"
     },
     {
       "step": 5,
-      "name": "redaction",
-      "status": "pending"
+      "name": "ai-pipeline",
+      "status": "completed",
+      "started_at": "2026-08-16T03:56:07+0900",
+      "summary": "src/lib/rules.ts(applyRules 부분문자열·최長패턴우선, derivePattern)와 quota.ts(checkQuota/consumeQuota→increment_usage RPC, checkSampleAllowance/markSampleUsed→mark_sample_used RPC, QUOTA는 tier.ts 단일출처) — 두 관문. src/services/anthropic/{client,prompt,classify,chat}.ts — getClient(호출시점 키), buildPromptBlocks(RedactedRow만 허용, system+ledger 두 cache_control ephemeral 블록 공유), classifyTransactions(tool use 강제, id로 응답 매핑, confidence<0.7→review 강등, 미지 accountCode→other), askAboutLedger(동일 프리픽스 재사용). src/app/api/analyze/route.ts — 세션 사용자 owner_id 채움, MAX_ROWS·본문크기 검증, fingerprint 중복판정, summarize 재집계, LLM 미호출. src/app/api/analyses/[id]/classify/route.ts — 소유확인(404)→mode 서버재판정(익명+full 거부)→관문(sample/quota)→classification IS NULL 대상 조회→applyRules 선적용→classifyTransactions(unmatched만)→id기준 저장→consumeQuota/markSampleUsed. 테스트 92개 추가(전체 266개), lint/build/test 모두 통과.",
+      "completed_at": "2026-08-16T04:17:58+0900"
     },
     {
       "step": 6,
-      "name": "supabase-schema",
-      "status": "pending"
+      "name": "product-ui",
+      "status": "completed",
+      "started_at": "2026-08-16T04:17:58+0900",
+      "summary": "A: src/lib/supabase/identity.ts(linkGoogle·signInGoogle, LinkError), src/app/auth/callback/route.ts(code교환+same-origin next검증), src/app/api/account/route.ts(DELETE, analyses·user_rules만 삭제+signOut, profiles·usage_counters·auth.users 미접근), src/app/api/analyses/[id]/route.ts(DELETE, 소유확인 404). B: src/app/api/analyses/[id]/transactions/route.ts(PATCH, edits[].id 소속검증, confidence:null, saveAsRule시 derivePattern 기준 (owner_id,merchant_pattern) upsert). C: src/app/api/analyses/[id]/chat/route.ts(POST, checkQuota→tier_required/quota_exceeded 구분→askAboutLedger→성공시만 consumeQuota, order by 고정). D: src/app/(marketing)/page.tsx(Server Component, QUOTA·SAMPLE_SIZE 기반 요금제), src/components/upload/{DropZone,MappingPanel,UploadFlow}.tsx(드롭시점 ensureSession, guessMapping/normalizeRows 재사용, 원본파일 미전송), src/components/preview/PreviewPanel.tsx(classify sample 호출 후 브라우저 Supabase 직접조회로 표본 렌더, 잔여건 비블러 안내), src/components/auth/ConnectPanel.tsx(decideAuthRoute 분기). E: src/app/(app)/dashboard/{page.tsx,[id]/page.tsx}(force-dynamic, 직접 DB조회, bucketByClassification 재사용, 사업경비 합계에 review·unclassified 미포함), src/components/dashboard/{TransactionTable,MonthlyChart,ClassifyFullButton,ChatPanel(Pro만 렌더),ExportButton(Pro만 렌더),DeleteDataButton,accountCodeLabels}.tsx(낙관적 PATCH+규칙저장 confirm, 인쇄 CSS). 테스트 41개 추가(전체 307개), lint/build/test 모두 통과.",
+      "completed_at": "2026-08-16T07:22:00+0900"
     },
     {
       "step": 7,
-      "name": "auth-session",
-      "status": "pending"
-    },
-    {
-      "step": 8,
-      "name": "analyze-api",
-      "status": "pending"
-    },
-    {
-      "step": 9,
-      "name": "rules-and-quota",
-      "status": "pending"
-    },
-    {
-      "step": 10,
-      "name": "anthropic-service",
-      "status": "pending"
-    },
-    {
-      "step": 11,
-      "name": "classify-api",
-      "status": "pending"
-    },
-    {
-      "step": 12,
-      "name": "identity-account",
-      "status": "pending"
-    },
-    {
-      "step": 13,
-      "name": "landing-upload",
-      "status": "pending"
-    },
-    {
-      "step": 14,
-      "name": "corrections-api",
-      "status": "pending"
-    },
-    {
-      "step": 15,
-      "name": "dashboard-ui",
-      "status": "pending"
-    },
-    {
-      "step": 16,
-      "name": "chat-api",
-      "status": "pending"
-    },
-    {
-      "step": 17,
-      "name": "polar-billing",
-      "status": "pending"
-    },
-    {
-      "step": 18,
-      "name": "deploy-config",
-      "status": "pending"
+      "name": "billing-and-deploy",
+      "status": "blocked",
+      "started_at": "2026-08-16T07:56:03+0900",
+      "summary": "A(Polar 결제): ADR-005 미해결 항목 검증 — 한국 정산 지원 확인(supported-countries에 South Korea 포함), 결제수단은 Stripe 카드 전용이라 국제 브랜드 국내 카드만 통과('국내전용' 카드·간편결제 불가)이므로 구현 진행. src/services/polar.ts(createCheckout: metadata.userId 주입·POLAR_SERVER로 sandbox/production 분기·호출시점 env, fetchSubscription, fetchCustomerSubscription: active만 조회). POST /api/billing/checkout(requireUser→세션 userId·email만 사용, successUrl=NEXT_PUBLIC_SITE_URL/dashboard?checkout_id={CHECKOUT_ID}). POST /api/billing/sync(GET 미노출, profiles.polar_* 조회→Polar 직접 확인→active+기간 있을 때만 admin으로 tier·current_period_end·polar_subscription_id 갱신, 티어 반환은 effective_tier RPC). POST /api/webhooks/polar(validateEvent 서명검증 실패 시 401 즉시 반환·admin 미생성, subscription.* 6종만 처리, 최신상태 덮어쓰기라 멱등, entitled=active|trialing, current_period_end는 이벤트에 있을 때만 기록해 취소 시 삭제 방지, userId는 metadata.userId→polar_customer_id 순 해석). admin 클라이언트 사용처는 billing/sync·webhooks/polar 두 곳뿐. UI: components/billing/{UpgradeButton,BillingSync}.tsx + dashboard/page.tsx(checkout_id 복귀 시 sync 후 refresh)·dashboard/[id]/page.tsx(free면 Q&A 자리에 Pro 안내+CTA, 블러 아님). 테스트 41개 추가(전체 348개). B(배포): README.md(제품 경계·세무 조언 없음 명시), DEPLOY.md(Supabase 생성→마이그레이션+usage_counters 정책 확인→대시보드 토글 3개→Anthropic 키→Polar 상품·웹훅·sandbox 우선→호스팅 환경변수 9개→스모크 테스트 13항목). vercel.json 불필요(Node 런타임 강제 라우트 없음, 환경변수 없이 빌드 통과 확인). lint/build/test 모두 통과.",
+      "blocked_reason": "외부 서비스 수동 설정 필요 — DEPLOY.md 참조. Supabase 프로젝트 생성/마이그레이션 적용/Anonymous Sign-Ins·Manual Linking·Google OAuth 활성화, Anthropic 키 발급, Polar 상품·웹훅 등록, 호스팅 환경변수 등록.",
+      "blocked_at": "2026-08-16T08:21:53+0900"
     }
   ],
   "created_at": "2026-08-14T16:09:54+0900"

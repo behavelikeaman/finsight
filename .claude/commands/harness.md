@@ -136,14 +136,18 @@ python3 scripts/execute.py {task-name}        # 순차 실행
 python3 scripts/execute.py {task-name} --push  # 실행 후 push
 ```
 
+실행 전 작업 트리가 깨끗해야 한다. step 파일(`step{N}.md`, `index.json`)까지 커밋한 뒤 실행하라. 미커밋 변경이 남아 있으면 execute.py가 중단한다 — step 커밋은 `git add -A`로 전부 담기 때문에 남의 변경이 섞여 들어간다.
+
 execute.py가 자동으로 처리하는 것:
 
 - `feat-{task-name}` 브랜치 생성/checkout
+- 모델 고정 — 모든 step을 동일 모델로 실행한다(`StepExecutor.MODEL`)
 - 가드레일 주입 — CLAUDE.md + docs/*.md 내용을 매 step 프롬프트에 포함
 - 컨텍스트 누적 — 완료된 step의 summary를 다음 step 프롬프트에 전달
 - 자가 교정 — 실패 시 최대 3회 재시도하며, 이전 에러 메시지를 프롬프트에 피드백
 - 2단계 커밋 — 코드 변경(`feat`)과 메타데이터(`chore`)를 분리 커밋
 - 타임스탬프 — started_at, completed_at, failed_at, blocked_at 자동 기록
+- phase 완료 판정 — 모든 step이 `completed`일 때만 phase를 완료로 마킹한다. 하나라도 남아 있으면 완료 처리를 건너뛰고, 예전 실행이 남긴 스테일한 `completed_at`을 지운다
 
 에러 복구:
 

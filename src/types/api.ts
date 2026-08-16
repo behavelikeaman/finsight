@@ -89,6 +89,14 @@ export interface CheckoutResponse {
   url: string;
 }
 
+/**
+ * POST /api/billing/portal
+ * 1회용 토큰이 박힌 Polar 고객 포털 URL. 저장하거나 로그에 남기지 마라.
+ */
+export interface PortalResponse {
+  url: string;
+}
+
 /** DELETE /api/analyses/:id · DELETE /api/account */
 export interface OkResponse {
   ok: true;

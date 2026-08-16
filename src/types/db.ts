@@ -13,7 +13,8 @@ import type {
 
 /**
  * auth.users INSERT 트리거로 자동 생성된다(tier='free').
- * tier · current_period_end · sample_used · polar_* 는 사용자가 쓸 수 없다.
+ * tier · current_period_end · sample_used · polar_* · subscription_status 는
+ * 사용자가 쓸 수 없다.
  */
 export interface ProfileRow {
   /** auth.users.id */
@@ -25,6 +26,11 @@ export interface ProfileRow {
   polar_subscription_id: string | null;
   /** ISO 8601 */
   current_period_end: string | null;
+  /**
+   * Polar status 원문(active·past_due·canceled 등). 안내 문구를 정하는 데만
+   * 쓴다. 권리 판정은 effective_tier() 한 곳에서만 한다.
+   */
+  subscription_status: string | null;
 }
 
 export interface AnalysisRow {
