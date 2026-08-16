@@ -201,6 +201,7 @@ describe("POST /api/billing/sync", () => {
 
     const allowed = new Set([
       "tier",
+      "subscription_status",
       "current_period_end",
       "polar_customer_id",
       "polar_subscription_id",

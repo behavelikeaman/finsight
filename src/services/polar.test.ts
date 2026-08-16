@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
   checkoutsCreate: vi.fn(),
   subscriptionsGet: vi.fn(),
   subscriptionsList: vi.fn(),
+  customerSessionsCreate: vi.fn(),
 }));
 
 vi.mock("@polar-sh/sdk", () => ({
@@ -13,6 +14,7 @@ vi.mock("@polar-sh/sdk", () => ({
 
 import {
   createCheckout,
+  createCustomerPortalSession,
   fetchCustomerSubscription,
   fetchSubscription,
 } from "./polar";
@@ -24,10 +26,12 @@ beforeEach(() => {
   mocks.checkoutsCreate.mockReset();
   mocks.subscriptionsGet.mockReset();
   mocks.subscriptionsList.mockReset();
+  mocks.customerSessionsCreate.mockReset();
 
   mocks.PolarCtor.mockImplementation(() => ({
     checkouts: { create: mocks.checkoutsCreate },
     subscriptions: { get: mocks.subscriptionsGet, list: mocks.subscriptionsList },
+    customerSessions: { create: mocks.customerSessionsCreate },
   }));
 
   mocks.checkoutsCreate.mockResolvedValue({
@@ -192,5 +196,29 @@ describe("fetchCustomerSubscription", () => {
     mocks.subscriptionsList.mockResolvedValue({ result: { items: [] } });
 
     expect(await fetchCustomerSubscription("cus-1")).toBeNull();
+  });
+});
+
+describe("createCustomerPortalSession", () => {
+  it("고객 포털 URL을 반환한다", async () => {
+    mocks.customerSessionsCreate.mockResolvedValue({
+      token: "cst-token",
+      customerPortalUrl: "https://polar.sh/portal?customer_session_token=cst-token",
+    });
+
+    const result = await createCustomerPortalSession("cus-1");
+
+    expect(mocks.customerSessionsCreate).toHaveBeenCalledWith({
+      customerId: "cus-1",
+    });
+    expect(result).toEqual({
+      url: "https://polar.sh/portal?customer_session_token=cst-token",
+    });
+  });
+
+  it("토큰이 없으면 호출 시점에 던진다(모듈 로드 시점이 아니라)", async () => {
+    delete process.env.POLAR_ACCESS_TOKEN;
+
+    await expect(createCustomerPortalSession("cus-1")).rejects.toThrow();
   });
 });

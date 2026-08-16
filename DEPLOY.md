@@ -126,6 +126,16 @@ CLI를 쓴다면 `supabase db push`.
 > 해지·만료 처리: 취소 이벤트가 와도 즉시 free로 내려가지 않는다. `current_period_end`
 > 까지 Pro를 유지하고, 만료 판정은 `effective_tier` DB 함수가 한다. 웹훅 처리는 멱등이므로
 > 같은 이벤트를 여러 번 받아도 결과가 같다.
+>
+> 결제 실패(`past_due`) 처리: 재청구를 시도하는 중이므로 **권리를 즉시 거두지
+> 않는다.** `/dashboard`에 "결제 수단 확인이 필요합니다" 배너를 띄워 포털로
+> 보내고, 갱신이 끝내 실패하면 `current_period_end` 만료와 함께
+> `effective_tier`가 free로 닫는다. 유예 일수를 따로 세지 않는다.
+>
+> 사용자의 해지·카드 교체·영수증 열람은 `/dashboard`의 **구독 관리** 버튼이
+> Polar 고객 포털(`/api/billing/portal`)로 보내 처리한다. 별도 설정은 없고
+> `POLAR_ACCESS_TOKEN`만 있으면 동작한다. 결제한 적 없는 사용자에게는 서버가
+> 버튼 자체를 내보내지 않는다(`profiles.polar_customer_id` 기준).
 
 ---
 

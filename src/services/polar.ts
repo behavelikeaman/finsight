@@ -44,6 +44,21 @@ export async function createCheckout(params: {
   return { url: checkout.url };
 }
 
+/**
+ * 고객 포털 세션을 만든다. 반환 URL에는 1회용 토큰이 박혀 있다.
+ *
+ * 해지·카드 교체·영수증은 전부 이 포털에서 처리한다. 결제 수단을 우리가
+ * 다루지 않는 것이 Merchant of Record를 쓰는 이유다(ADR-005).
+ * URL은 토큰을 포함하므로 저장하거나 로그에 남기지 마라.
+ */
+export async function createCustomerPortalSession(
+  customerId: string,
+): Promise<{ url: string }> {
+  const session = await getClient().customerSessions.create({ customerId });
+
+  return { url: session.customerPortalUrl };
+}
+
 /** 구독 ID를 아는 경우. billing/sync 가 Polar의 최신 상태를 직접 확인한다. */
 export async function fetchSubscription(
   subscriptionId: string,

@@ -8,6 +8,7 @@
  * 3. **취소를 즉시 free로 내리지 않는다.** Polar는 해지 예약 상태에서도
  *    status를 active로 유지한다. 기간 만료 판정은 effective_tier DB 함수가
  *    current_period_end로 한다. 그래서 current_period_end를 null로 덮지 않는다.
+ *    결제 실패(past_due)도 같은 이유로 앞당겨 내리지 않는다(lib/entitlement.ts).
  *
  * 웹훅에는 사용자 세션이 없으므로 service role 클라이언트를 쓴다.
  * 이 라우트와 billing/sync 외의 어떤 파일에서도 admin을 import 하지 마라.
@@ -15,11 +16,9 @@
 import { validateEvent } from "@polar-sh/sdk/webhooks";
 import { NextResponse, type NextRequest } from "next/server";
 
+import { isEntitledStatus } from "@/lib/entitlement";
 import { serverEnv } from "@/lib/env";
 import { createAdminSupabase } from "@/lib/supabase/admin";
-
-/** 이 상태에서만 Pro 권리를 준다. */
-const ENTITLED_STATUSES = new Set(["active", "trialing"]);
 
 interface SubscriptionData {
   id: string;
@@ -60,7 +59,10 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
 
   const update: Record<string, string> = {
-    tier: ENTITLED_STATUSES.has(subscription.status) ? "pro" : "free",
+    tier: isEntitledStatus(subscription.status) ? "pro" : "free",
+    // 상태 원문을 그대로 남긴다. 화면이 결제 실패를 안내하는 근거이며,
+    // 티어 판정에는 쓰지 않는다(effective_tier 한 곳에서만 판정한다).
+    subscription_status: subscription.status,
     polar_customer_id: subscription.customerId,
     polar_subscription_id: subscription.id,
   };

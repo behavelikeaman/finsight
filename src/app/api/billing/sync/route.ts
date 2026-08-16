@@ -14,6 +14,7 @@
  */
 import { NextResponse } from "next/server";
 
+import { isEntitledStatus } from "@/lib/entitlement";
 import { createAdminSupabase } from "@/lib/supabase/admin";
 import { createServerSupabase } from "@/lib/supabase/server";
 import {
@@ -27,9 +28,6 @@ import {
   fetchCustomerSubscription,
   fetchSubscription,
 } from "@/services/polar";
-
-/** Polar 구독이 권리를 주는 상태. 그 외(canceled·unpaid·past_due 등)는 열지 않는다. */
-const ENTITLED_STATUSES = new Set(["active", "trialing"]);
 
 interface ProfileRow {
   polar_customer_id: string | null;
@@ -63,13 +61,14 @@ export async function POST(): Promise<NextResponse> {
 
   if (
     resolved &&
-    ENTITLED_STATUSES.has(resolved.status) &&
+    isEntitledStatus(resolved.status) &&
     resolved.currentPeriodEnd !== null
   ) {
     await createAdminSupabase()
       .from("profiles")
       .update({
         tier: "pro",
+        subscription_status: resolved.status,
         current_period_end: resolved.currentPeriodEnd,
         polar_subscription_id: resolved.subscriptionId,
       })

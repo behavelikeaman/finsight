@@ -142,6 +142,7 @@ describe("POST /api/webhooks/polar — 상태 반영", () => {
     expect(res.status).toBe(200);
     expect(adminUpdates[0]).toEqual({
       tier: "pro",
+      subscription_status: "active",
       current_period_end: "2026-09-30T00:00:00.000Z",
       polar_customer_id: "cus-1",
       polar_subscription_id: "sub-1",
@@ -189,14 +190,51 @@ describe("POST /api/webhooks/polar — 상태 반영", () => {
     expect(adminUpdates[0]).not.toHaveProperty("current_period_end");
   });
 
-  it("결제 실패(past_due)면 free로 판정한다", async () => {
+  // 결제 실패는 재시도 중인 상태이지 해지가 아니다. 즉시 free로 내리면
+  // 하루 뒤 재청구가 성공해도 그 사이 사용자는 이유 없이 잘린다. 기간이
+  // 지나면 effective_tier가 알아서 free로 만들므로 여기서 앞당기지 않는다.
+  it("결제 실패(past_due)여도 tier를 free로 내리지 않는다", async () => {
     mocks.validateEvent.mockReturnValue(
       subscriptionEvent("subscription.updated", { status: "past_due" }),
     );
 
     await POST(request());
 
-    expect(adminUpdates[0]).toMatchObject({ tier: "free" });
+    expect(adminUpdates[0]).toMatchObject({ tier: "pro" });
+  });
+
+  it("결제 실패 상태를 그대로 기록한다 — 화면이 안내 문구를 띄우는 근거다", async () => {
+    mocks.validateEvent.mockReturnValue(
+      subscriptionEvent("subscription.updated", { status: "past_due" }),
+    );
+
+    await POST(request());
+
+    expect(adminUpdates[0]).toMatchObject({ subscription_status: "past_due" });
+  });
+
+  it("정상 구독이면 상태도 active로 되돌아온다", async () => {
+    mocks.validateEvent.mockReturnValue(subscriptionEvent("subscription.active"));
+
+    await POST(request());
+
+    expect(adminUpdates[0]).toMatchObject({
+      tier: "pro",
+      subscription_status: "active",
+    });
+  });
+
+  it("해지 완료(canceled)는 free로 내리고 상태도 함께 남긴다", async () => {
+    mocks.validateEvent.mockReturnValue(
+      subscriptionEvent("subscription.revoked", { status: "canceled" }),
+    );
+
+    await POST(request());
+
+    expect(adminUpdates[0]).toMatchObject({
+      tier: "free",
+      subscription_status: "canceled",
+    });
   });
 
   it("metadata가 없으면 polar_customer_id로 사용자를 찾는다", async () => {
@@ -261,6 +299,7 @@ describe("POST /api/webhooks/polar — admin 사용 범위", () => {
       "current_period_end",
       "polar_customer_id",
       "polar_subscription_id",
+      "subscription_status",
     ]);
     for (const payload of adminUpdates) {
       for (const key of Object.keys(payload)) {
