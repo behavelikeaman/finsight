@@ -13,7 +13,9 @@ vi.mock("./browser", () => ({
   createBrowserSupabase: mocks.createBrowserSupabase,
 }));
 
-import { linkGoogle, signInGoogle } from "./identity";
+import { buildCallbackUrl, linkGoogle, signInGoogle } from "./identity";
+
+const ORIGIN = "http://localhost:3000";
 
 beforeEach(() => {
   mocks.linkIdentity.mockReset();
@@ -26,6 +28,22 @@ beforeEach(() => {
       signOut: mocks.signOut,
     },
   });
+  // node 환경이라 window가 없다. origin만 있으면 된다.
+  vi.stubGlobal("window", { location: { origin: ORIGIN } });
+});
+
+describe("buildCallbackUrl", () => {
+  it("code를 교환하는 /auth/callback을 가리키는 절대 URL을 만든다", () => {
+    expect(buildCallbackUrl(ORIGIN, "/dashboard")).toBe(
+      "http://localhost:3000/auth/callback?next=%2Fdashboard",
+    );
+  });
+
+  it("돌아갈 경로를 next로 실어 보낸다", () => {
+    expect(buildCallbackUrl(ORIGIN, "/dashboard/abc-123")).toBe(
+      "http://localhost:3000/auth/callback?next=%2Fdashboard%2Fabc-123",
+    );
+  });
 });
 
 describe("linkGoogle", () => {
@@ -36,9 +54,24 @@ describe("linkGoogle", () => {
 
     expect(mocks.linkIdentity).toHaveBeenCalledWith({
       provider: "google",
-      options: { redirectTo: "/dashboard" },
+      options: {
+        redirectTo: "http://localhost:3000/auth/callback?next=%2Fdashboard",
+      },
     });
     expect(result.error).toBeUndefined();
+  });
+
+  it("앱 경로를 그대로 넘기지 않는다 — 상대 경로면 Supabase가 Site URL로 폴백해 code가 교환되지 않는다", async () => {
+    mocks.linkIdentity.mockResolvedValue({ error: null });
+
+    await linkGoogle("/dashboard/abc-123");
+
+    const [call] = mocks.linkIdentity.mock.calls as [
+      [{ options: { redirectTo: string } }],
+    ];
+    const sent = call[0].options.redirectTo;
+    expect(sent).not.toBe("/dashboard/abc-123");
+    expect(sent.startsWith("http://localhost:3000/auth/callback")).toBe(true);
   });
 
   it("이미 다른 계정에 연결된 Google이면 identity_taken", async () => {
@@ -90,7 +123,9 @@ describe("signInGoogle", () => {
 
     expect(mocks.signInWithOAuth).toHaveBeenCalledWith({
       provider: "google",
-      options: { redirectTo: "/dashboard" },
+      options: {
+        redirectTo: "http://localhost:3000/auth/callback?next=%2Fdashboard",
+      },
     });
   });
 });

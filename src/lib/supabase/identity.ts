@@ -17,14 +17,26 @@ interface AuthErrorLike {
   message: string;
 }
 
+/**
+ * OAuth 제공자가 브라우저를 돌려보낼 절대 URL.
+ *
+ * 앱 경로(`/dashboard/:id`)를 Supabase에 그대로 넘기면 안 된다 — 상대 경로는
+ * 처리되지 않아 Site URL로 폴백하고, code가 교환되지 않은 채 랜딩에 남는다.
+ * 반드시 code를 세션으로 바꾸는 `/auth/callback`을 거치게 하고, 돌아갈 앱
+ * 경로는 next로 실어 보낸다.
+ */
+export function buildCallbackUrl(origin: string, next: string): string {
+  return `${origin}/auth/callback?next=${encodeURIComponent(next)}`;
+}
+
 /** 익명 세션의 결과를 유지한 채 Google을 연결한다. uid가 그대로 남는다. */
 export async function linkGoogle(
-  redirectTo: string,
+  next: string,
 ): Promise<{ error?: LinkError }> {
   const supabase = createBrowserSupabase();
   const { error } = await supabase.auth.linkIdentity({
     provider: "google",
-    options: { redirectTo },
+    options: { redirectTo: buildCallbackUrl(window.location.origin, next) },
   });
 
   // 실패해도 세션을 정리하거나 로그아웃시키지 않는다 — 현재 익명 세션과 그
@@ -35,11 +47,11 @@ export async function linkGoogle(
 }
 
 /** 기존 계정으로 진입한다. 재방문자 경로. */
-export async function signInGoogle(redirectTo: string): Promise<void> {
+export async function signInGoogle(next: string): Promise<void> {
   const supabase = createBrowserSupabase();
   await supabase.auth.signInWithOAuth({
     provider: "google",
-    options: { redirectTo },
+    options: { redirectTo: buildCallbackUrl(window.location.origin, next) },
   });
 }
 
