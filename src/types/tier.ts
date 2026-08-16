@@ -22,3 +22,20 @@ export const QUOTA: Record<
   free: { classifyPerMonth: 1, chatPerMonth: 0 },
   pro: { classifyPerMonth: 10, chatPerMonth: 100 },
 };
+
+/**
+ * Pro 구독 가격.
+ *
+ * **Polar 상품에 설정된 금액과 반드시 일치해야 한다.** 어긋나면 랜딩에서 본
+ * 금액과 결제 화면 금액이 달라 결제 직전에 이탈한다. 상품 가격을 바꿀 때는
+ * 이 값도 같이 바꿔라.
+ *
+ * 통화가 USD인 것은 Polar가 카드 결제만 처리하기 때문이다(ADR-005). 원화로
+ * 적으면 환율에 따라 실제 청구액과 어긋난다.
+ */
+export const PRO_PRICE = {
+  amount: 19.99,
+  currency: "USD",
+  /** 화면 표기. 원화가 아님이 드러나야 한다. */
+  display: "$19.99",
+} as const;

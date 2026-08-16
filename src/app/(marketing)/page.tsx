@@ -1,6 +1,6 @@
 import { HeaderAuth } from "@/components/auth/HeaderAuth";
 import { UploadFlow } from "@/components/upload/UploadFlow";
-import { QUOTA, SAMPLE_SIZE } from "@/types/tier";
+import { PRO_PRICE, QUOTA, SAMPLE_SIZE } from "@/types/tier";
 
 const FEATURES = [
   {
@@ -68,7 +68,7 @@ export default function LandingPage() {
         <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
           <PricingCard
             name="Free"
-            price="0원"
+            price="무료"
             items={[
               "업로드·집계 프리뷰 무제한",
               `전건 경비 분류 월 ${QUOTA.free.classifyPerMonth}회`,
@@ -79,7 +79,7 @@ export default function LandingPage() {
           />
           <PricingCard
             name="Pro"
-            price="월 구독"
+            price={`${PRO_PRICE.display} / 월`}
             items={[
               "업로드·집계 프리뷰 무제한",
               `전건 경비 분류 월 ${QUOTA.pro.classifyPerMonth}회`,
