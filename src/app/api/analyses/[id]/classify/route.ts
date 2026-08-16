@@ -9,7 +9,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { pickSample } from "@/lib/analysis";
-import { checkQuota, checkSampleAllowance, consumeQuota, markSampleUsed } from "@/lib/quota";
+import { checkQuota, checkSampleAllowance, claimSample, consumeQuota } from "@/lib/quota";
 import { applyRules } from "@/lib/rules";
 import { isAnonymousUser } from "@/lib/supabase/auth";
 import { createServerSupabase } from "@/lib/supabase/server";
@@ -150,6 +150,19 @@ export async function POST(
     return NextResponse.json({ ok: false }, { status: 500 });
   }
 
+  // 표본 기회는 **여기서** 선점한다. 앞단의 checkSampleAllowance는 빠른 거부일
+  // 뿐이고, 그것과 이 지점 사이에는 수 초가 비어 있다. 그 틈으로 두 번째 요청이
+  // 들어오면 둘 다 LLM을 호출해 같은 결과에 비용만 두 배로 나간다.
+  // claim_sample()은 판정과 소진이 한 UPDATE라 하나만 통과한다.
+  if (mode === "sample" && unmatched.length > 0) {
+    const claimed = await claimSample(userId);
+
+    if (!claimed) {
+      // 규칙으로 분류된 건은 이미 저장했다. 경합에서 진 것뿐이므로 에러가 아니다.
+      return jsonResponse({ ok: false, reason: "sample_used" });
+    }
+  }
+
   let aiResults: ClassifyOutputItem[] = [];
 
   if (unmatched.length > 0) {
@@ -184,10 +197,9 @@ export async function POST(
     .eq("id", analysisId)
     .eq("owner_id", userId);
 
-  // 관문 → 호출 → 차감. 성공 경로에서만 차감한다.
-  if (mode === "sample") {
-    await markSampleUsed(userId);
-  } else {
+  // 표본은 LLM 호출 직전에 이미 선점했다(claimSample). 여기서 또 소진하지 마라.
+  // 월 쿼터는 경합에 노출되는 구간이 아니라 성공 경로에서만 차감한다.
+  if (mode !== "sample") {
     await consumeQuota(userId, "classify");
   }
 

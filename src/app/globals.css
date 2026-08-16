@@ -45,6 +45,9 @@
   --color-personal-soft: #f0f1f3;
   --color-review: #f4b000;
   --color-review-soft: #fdf4e0;
+  /* 채우기용 노랑(#f4b000)은 연한 배경 위에서 1.74:1이라 글자로 쓸 수 없다.
+     배지처럼 글자에 쓸 때는 이 값을 쓴다(review-soft 위 4.97:1). */
+  --color-review-ink: #8a6300;
 }
 
 html {

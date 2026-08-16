@@ -60,7 +60,12 @@ export async function consumeQuota(
   }
 }
 
-/** 익명 표본 1회 제한. profiles.sample_used를 읽는다(SELECT만 허용됨). */
+/**
+ * 익명 표본 1회 제한의 **빠른 거부**용 읽기. profiles.sample_used를 본다.
+ *
+ * 이것만으로 관문을 삼지 마라 — 읽은 뒤 LLM 호출까지 수 초가 비어 있어,
+ * 그 사이 도착한 요청이 같이 통과한다. 실제 소진은 claimSample()이 한다.
+ */
 export async function checkSampleAllowance(userId: string): Promise<boolean> {
   const supabase = await createServerSupabase();
   const { data, error } = await supabase
@@ -74,15 +79,25 @@ export async function checkSampleAllowance(userId: string): Promise<boolean> {
   return (data as { sample_used: boolean }).sample_used === false;
 }
 
-export async function markSampleUsed(userId: string): Promise<void> {
-  void userId; // mark_sample_used도 auth.uid()로 판정한다.
+/**
+ * 표본 기회를 **원자적으로 선점한다.** LLM을 호출하기 직전에 부른다.
+ *
+ * claim_sample()은 판정과 소진이 한 UPDATE 문이라, 동시에 들어온 요청 중
+ * 하나만 true를 받는다. 검사 후 나중에 소진하는 순서로 되돌리지 마라 —
+ * 그 틈으로 두 요청이 모두 LLM을 호출해 비용이 배로 나간다.
+ *
+ * 실패(RPC 에러)는 false로 닫는다. 선점 여부를 모르는 채 진행하면 중복
+ * 과금이 나므로, 모르면 호출하지 않는 쪽이 옳다.
+ */
+export async function claimSample(userId: string): Promise<boolean> {
+  void userId; // claim_sample도 auth.uid()로 판정한다.
 
   const supabase = await createServerSupabase();
-  const { error } = await supabase.rpc("mark_sample_used");
+  const { data, error } = await supabase.rpc("claim_sample");
 
-  if (error) {
-    throw new Error(`표본 사용 플래그 갱신에 실패했습니다: ${error.message}`);
-  }
+  if (error) return false;
+
+  return data === true;
 }
 
 async function readUsage(userId: string, kind: QuotaKind): Promise<number> {

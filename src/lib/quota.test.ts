@@ -18,8 +18,8 @@ vi.mock("./supabase/server", () => ({
 import {
   checkQuota,
   checkSampleAllowance,
+  claimSample,
   consumeQuota,
-  markSampleUsed,
 } from "./quota";
 
 /** .from(table).select().eq().eq().maybeSingle() 체인을 흉내낸다. */
@@ -172,19 +172,33 @@ describe("checkSampleAllowance", () => {
   });
 });
 
-describe("markSampleUsed", () => {
-  it("mark_sample_used RPC를 호출한다", async () => {
-    mocks.rpc.mockResolvedValue({ data: null, error: null });
+describe("claimSample", () => {
+  it("claim_sample RPC를 호출한다", async () => {
+    mocks.rpc.mockResolvedValue({ data: true, error: null });
 
-    await markSampleUsed("uid-1");
+    await claimSample("uid-1");
 
-    expect(mocks.rpc).toHaveBeenCalledWith("mark_sample_used");
+    expect(mocks.rpc).toHaveBeenCalledWith("claim_sample");
     expect(mocks.from).not.toHaveBeenCalled();
   });
 
-  it("RPC가 실패하면 던진다", async () => {
+  it("선점에 성공하면 true", async () => {
+    mocks.rpc.mockResolvedValue({ data: true, error: null });
+
+    await expect(claimSample("uid-1")).resolves.toBe(true);
+  });
+
+  // 경합에서 진 쪽이다. 호출자는 이 false를 보고 LLM 호출 전에 멈춰야 한다.
+  it("이미 소진되었으면 false", async () => {
+    mocks.rpc.mockResolvedValue({ data: false, error: null });
+
+    await expect(claimSample("uid-1")).resolves.toBe(false);
+  });
+
+  // 선점 여부를 모르는 채로 진행하면 중복 과금이 난다. 막는 쪽으로 닫는다.
+  it("RPC가 실패하면 false", async () => {
     mocks.rpc.mockResolvedValue({ data: null, error: { message: "boom" } });
 
-    await expect(markSampleUsed("uid-1")).rejects.toThrow();
+    await expect(claimSample("uid-1")).resolves.toBe(false);
   });
 });

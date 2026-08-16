@@ -50,10 +50,13 @@ const CLASSIFICATION_LABEL: Record<Classification, string> = {
   review: "확인 필요",
 };
 
+// 배경은 분류색의 연한 톤, 글자는 진한 톤을 쓴다. 채우기용 원색(business·
+// review)을 글자에 쓰면 연한 배경 위에서 각각 2.52:1, 1.74:1로 WCAG AA에
+// 한참 못 미친다.
 const CLASSIFICATION_BADGE: Record<Classification, string> = {
-  business: "bg-business-soft text-business",
-  personal: "bg-personal-soft text-personal",
-  review: "bg-review-soft text-review",
+  business: "bg-business-soft text-business-ink",
+  personal: "bg-personal-soft text-muted",
+  review: "bg-review-soft text-review-ink",
 };
 
 export function PreviewPanel({
@@ -68,6 +71,11 @@ export function PreviewPanel({
 
   useEffect(() => {
     let cancelled = false;
+    // cancelled 플래그만으로는 부족하다 — 그것은 응답 "처리"만 막고 이미 나간
+    // 요청은 서버에서 계속 돈다. StrictMode가 effect를 두 번 실행하면 요청이
+    // 두 번 나가고, 서버는 둘 다 LLM에 태워 같은 결과에 비용만 두 배로 든다.
+    // 실제로 재현된 문제라 요청 자체를 끊는다.
+    const controller = new AbortController();
 
     void (async () => {
       try {
@@ -76,6 +84,7 @@ export function PreviewPanel({
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
+          signal: controller.signal,
         });
         const json = (await res.json()) as ClassifyResponse;
 
@@ -130,6 +139,7 @@ export function PreviewPanel({
 
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [analysisId]);
 

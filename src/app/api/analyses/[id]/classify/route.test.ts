@@ -12,7 +12,7 @@ const mocks = vi.hoisted(() => ({
   checkQuota: vi.fn(),
   checkSampleAllowance: vi.fn(),
   consumeQuota: vi.fn(),
-  markSampleUsed: vi.fn(),
+  claimSample: vi.fn(),
   classifyTransactions: vi.fn(),
 }));
 
@@ -30,7 +30,7 @@ vi.mock("@/lib/quota", () => ({
   checkQuota: mocks.checkQuota,
   checkSampleAllowance: mocks.checkSampleAllowance,
   consumeQuota: mocks.consumeQuota,
-  markSampleUsed: mocks.markSampleUsed,
+  claimSample: mocks.claimSample,
 }));
 
 vi.mock("@/services/anthropic/classify", () => ({
@@ -109,7 +109,7 @@ beforeEach(() => {
   mocks.checkQuota.mockReset();
   mocks.checkSampleAllowance.mockReset();
   mocks.consumeQuota.mockReset();
-  mocks.markSampleUsed.mockReset();
+  mocks.claimSample.mockReset();
   mocks.classifyTransactions.mockReset();
 
   mocks.requireUser.mockResolvedValue(user());
@@ -117,7 +117,7 @@ beforeEach(() => {
   mocks.checkQuota.mockResolvedValue({ allowed: true, left: 9 });
   mocks.checkSampleAllowance.mockResolvedValue(true);
   mocks.consumeQuota.mockResolvedValue(undefined);
-  mocks.markSampleUsed.mockResolvedValue(undefined);
+  mocks.claimSample.mockResolvedValue(true);
   mocks.classifyTransactions.mockImplementation(
     async ({ rows }: { rows: IdentifiedRow[] }) =>
       rows.map((row) => ({
@@ -286,14 +286,44 @@ describe("POST /api/analyses/:id/classify", () => {
 
     expect(mocks.consumeQuota).toHaveBeenCalledTimes(1);
     expect(mocks.consumeQuota).toHaveBeenCalledWith("uid-1", "classify");
-    expect(mocks.markSampleUsed).not.toHaveBeenCalled();
+    expect(mocks.claimSample).not.toHaveBeenCalled();
   });
 
-  it("mode:'sample'이면 성공 시 markSampleUsed가 호출되고 consumeQuota는 호출되지 않는다", async () => {
+  it("mode:'sample'이면 claimSample이 호출되고 consumeQuota는 호출되지 않는다", async () => {
     await POST(request({ mode: "sample" }), ctx());
 
-    expect(mocks.markSampleUsed).toHaveBeenCalledWith("uid-1");
+    expect(mocks.claimSample).toHaveBeenCalledWith("uid-1");
     expect(mocks.consumeQuota).not.toHaveBeenCalled();
+  });
+
+  // 경합의 핵심. 선점에 실패했으면 LLM을 부르기 전에 멈춰야 한다.
+  // 부른 뒤에 멈추면 이미 과금된 뒤라 의미가 없다.
+  it("mode:'sample'인데 선점에 실패하면 AI를 호출하지 않고 sample_used를 반환한다", async () => {
+    mocks.claimSample.mockResolvedValue(false);
+
+    const res = await POST(request({ mode: "sample" }), ctx());
+    const json = (await res.json()) as { ok: false; reason: string };
+
+    expect(json.reason).toBe("sample_used");
+    expect(mocks.classifyTransactions).not.toHaveBeenCalled();
+  });
+
+  // 선점은 LLM 호출 "직전"이어야 한다. 앞단 검사만 통과하고 선점을 늦추면
+  // 그 사이에 들어온 두 번째 요청이 같이 LLM을 호출한다.
+  it("mode:'sample'에서 선점이 AI 호출보다 먼저 일어난다", async () => {
+    const order: string[] = [];
+    mocks.claimSample.mockImplementation(async () => {
+      order.push("claim");
+      return true;
+    });
+    mocks.classifyTransactions.mockImplementation(async () => {
+      order.push("ai");
+      return [];
+    });
+
+    await POST(request({ mode: "sample" }), ctx());
+
+    expect(order).toEqual(["claim", "ai"]);
   });
 
   it("is_user_edited인 건은 대상에서 빠진다(classification IS NULL로 조회)", async () => {
