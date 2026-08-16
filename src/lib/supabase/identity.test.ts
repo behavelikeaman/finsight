@@ -13,7 +13,12 @@ vi.mock("./browser", () => ({
   createBrowserSupabase: mocks.createBrowserSupabase,
 }));
 
-import { buildCallbackUrl, linkGoogle, signInGoogle } from "./identity";
+import {
+  buildCallbackUrl,
+  linkGoogle,
+  parseOAuthErrorFromHash,
+  signInGoogle,
+} from "./identity";
 
 const ORIGIN = "http://localhost:3000";
 
@@ -43,6 +48,28 @@ describe("buildCallbackUrl", () => {
     expect(buildCallbackUrl(ORIGIN, "/dashboard/abc-123")).toBe(
       "http://localhost:3000/auth/callback?next=%2Fdashboard%2Fabc-123",
     );
+  });
+});
+
+// Supabase는 연결 실패를 쿼리가 아니라 URL 프래그먼트로 붙여 보낸다.
+// 프래그먼트는 서버로 전송되지 않아 콜백 라우트에서는 보이지 않는다.
+describe("parseOAuthErrorFromHash", () => {
+  it("이미 다른 계정이 쓰는 Google이면 identity_taken을 돌려준다", () => {
+    expect(
+      parseOAuthErrorFromHash(
+        "#error=server_error&error_code=identity_already_exists&error_description=Identity%20is%20already%20linked",
+      ),
+    ).toBe("identity_taken");
+  });
+
+  it("그 밖의 실패는 oauth_failed로 묶는다", () => {
+    expect(parseOAuthErrorFromHash("#error=access_denied")).toBe("oauth_failed");
+  });
+
+  it("실패가 아니면 null을 돌려준다", () => {
+    expect(parseOAuthErrorFromHash("")).toBeNull();
+    expect(parseOAuthErrorFromHash("#")).toBeNull();
+    expect(parseOAuthErrorFromHash("#access_token=abc&type=bearer")).toBeNull();
   });
 });
 

@@ -8,14 +8,31 @@
  * 있다. 그래서 "다시 시도"가 아니라 로그인으로 안내한다. 로그인하면 익명
  * 세션의 분석은 따라가지 않으므로, 그 사실을 누르기 전에 밝힌다.
  */
-import { signInGoogle } from "@/lib/supabase/identity";
+import { useSyncExternalStore } from "react";
+
+import { parseOAuthErrorFromHash, signInGoogle } from "@/lib/supabase/identity";
 
 interface AuthErrorNoticeProps {
   reason: string;
 }
 
+function subscribeToHash(onChange: () => void): () => void {
+  window.addEventListener("hashchange", onChange);
+  return () => window.removeEventListener("hashchange", onChange);
+}
+
 export function AuthErrorNotice({ reason }: AuthErrorNoticeProps) {
-  if (reason !== "identity_taken") {
+  // Supabase는 실패 사유를 프래그먼트로 붙여 보내는데 서버는 그것을 볼 수 없어
+  // missing_code로 뭉갠다. 브라우저에서 실제 사유를 되찾는다. 서버 스냅샷은
+  // 빈 문자열이라 프래그먼트를 못 읽는 쪽에서는 prop이 그대로 쓰인다.
+  const hash = useSyncExternalStore(
+    subscribeToHash,
+    () => window.location.hash,
+    () => "",
+  );
+  const resolved = parseOAuthErrorFromHash(hash) ?? reason;
+
+  if (resolved !== "identity_taken") {
     return (
       <p className="no-print rounded-md border border-hairline bg-surface-soft px-4 py-3 text-sm text-review">
         Google 연결에 실패했습니다. 잠시 후 다시 시도해 주세요.

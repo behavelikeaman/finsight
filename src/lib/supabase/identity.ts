@@ -29,6 +29,23 @@ export function buildCallbackUrl(origin: string, next: string): string {
   return `${origin}/auth/callback?next=${encodeURIComponent(next)}`;
 }
 
+/**
+ * OAuth 실패 사유를 URL 프래그먼트에서 읽는다.
+ *
+ * Supabase는 연결 실패를 쿼리가 아니라 `#error=...&error_code=...`로 붙여
+ * 보낸다. 프래그먼트는 서버로 전송되지 않으므로 `/auth/callback`은 이 값을
+ * 볼 수 없고, 코드 누락과 구분하지 못한 채 되돌린다. 브라우저에서 다시 읽어
+ * 실제 사유를 복구해야 사용자에게 다음 행동을 안내할 수 있다.
+ */
+export function parseOAuthErrorFromHash(hash: string): string | null {
+  const params = new URLSearchParams(hash.replace(/^#/, ""));
+  const code = params.get("error_code");
+
+  if (!code && !params.get("error")) return null;
+
+  return code === "identity_already_exists" ? "identity_taken" : "oauth_failed";
+}
+
 /** 익명 세션의 결과를 유지한 채 Google을 연결한다. uid가 그대로 남는다. */
 export async function linkGoogle(
   next: string,
