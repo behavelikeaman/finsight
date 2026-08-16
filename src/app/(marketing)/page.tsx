@@ -1,3 +1,4 @@
+import { HeaderAuth } from "@/components/auth/HeaderAuth";
 import { UploadFlow } from "@/components/upload/UploadFlow";
 import { QUOTA, SAMPLE_SIZE } from "@/types/tier";
 
@@ -18,7 +19,12 @@ const FEATURES = [
 
 export default function LandingPage() {
   return (
-    <main className="mx-auto flex max-w-[1200px] flex-col gap-16 px-6 py-16 sm:py-24">
+    <main className="mx-auto flex max-w-[1200px] flex-col gap-16 px-6 py-8 sm:py-12">
+      {/* 재방문자는 파일을 다시 올리지 않고 여기로 자기 분석에 들어간다. */}
+      <header className="flex justify-end">
+        <HeaderAuth />
+      </header>
+
       {/* 이 페이지의 주인공은 히어로 문구가 아니라 드롭존이다. 문구는 드롭존을
           설명하는 말이므로 한 덩어리로 붙이고, 아래 조연 섹션과는 떼어 놓는다. */}
       <div className="flex flex-col gap-8">
