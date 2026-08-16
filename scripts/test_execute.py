@@ -617,6 +617,133 @@ class TestMainCli:
 # _check_blockers (= 이전 main() error/blocked 체크)
 # ---------------------------------------------------------------------------
 
+class TestFinalize:
+    """미완료 step이 남아 있으면 phase를 완료로 마킹하면 안 된다.
+
+    실제로 0-mvp에서 step 3·4 직후 'mark phase completed' 커밋이 찍혔고,
+    사람이 되돌려야 했다. index.json에 스테일한 completed_at도 남았다.
+    """
+
+    @staticmethod
+    def _mock_git(executor):
+        executor._run_git = lambda *a: MagicMock(returncode=0, stdout="", stderr="")
+
+    def test_skips_when_step_incomplete(self, executor, top_index):
+        executor._top_index_file = top_index
+        self._mock_git(executor)
+
+        executor._finalize()
+
+        index = json.loads(executor._index_file.read_text(encoding="utf-8"))
+        assert "completed_at" not in index
+        top = json.loads(top_index.read_text(encoding="utf-8"))
+        assert next(p for p in top["phases"] if p["dir"] == "0-mvp")["status"] == "pending"
+
+    def test_removes_stale_completed_at_when_incomplete(self, executor, top_index):
+        executor._top_index_file = top_index
+        self._mock_git(executor)
+        index = json.loads(executor._index_file.read_text(encoding="utf-8"))
+        index["completed_at"] = "2026-08-15T19:13:01+0900"
+        ex.StepExecutor._write_json(executor._index_file, index)
+
+        executor._finalize()
+
+        index = json.loads(executor._index_file.read_text(encoding="utf-8"))
+        assert "completed_at" not in index
+
+    def test_marks_completed_when_all_steps_done(self, executor, top_index):
+        executor._top_index_file = top_index
+        self._mock_git(executor)
+        index = json.loads(executor._index_file.read_text(encoding="utf-8"))
+        for s in index["steps"]:
+            s["status"] = "completed"
+        ex.StepExecutor._write_json(executor._index_file, index)
+
+        executor._finalize()
+
+        index = json.loads(executor._index_file.read_text(encoding="utf-8"))
+        assert "completed_at" in index
+        top = json.loads(top_index.read_text(encoding="utf-8"))
+        assert next(p for p in top["phases"] if p["dir"] == "0-mvp")["status"] == "completed"
+
+    def test_blocked_step_is_not_completion(self, executor, top_index):
+        executor._top_index_file = top_index
+        self._mock_git(executor)
+        index = json.loads(executor._index_file.read_text(encoding="utf-8"))
+        index["steps"][2]["status"] = "blocked"
+        ex.StepExecutor._write_json(executor._index_file, index)
+
+        executor._finalize()
+
+        index = json.loads(executor._index_file.read_text(encoding="utf-8"))
+        assert "completed_at" not in index
+
+
+# ---------------------------------------------------------------------------
+# _check_clean_tree
+# ---------------------------------------------------------------------------
+
+class TestCheckCleanTree:
+    """더러운 작업 트리에서 시작하면 남의 미커밋 변경이 step 커밋에 섞인다.
+
+    _commit_step이 `git add -A`로 전부 스테이징하기 때문이다.
+    """
+
+    def test_dirty_tree_exits(self, executor):
+        executor._run_git = lambda *a: MagicMock(
+            returncode=0, stdout=" M src/app/page.tsx\n?? dev.log\n", stderr=""
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            executor._check_clean_tree()
+        assert exc_info.value.code == 1
+
+    def test_clean_tree_passes(self, executor):
+        executor._run_git = lambda *a: MagicMock(returncode=0, stdout="", stderr="")
+        executor._check_clean_tree()
+
+    def test_git_failure_is_deferred_to_checkout(self, executor):
+        """git 자체가 안 되는 경우의 진단은 _checkout_branch가 담당한다."""
+        executor._run_git = lambda *a: MagicMock(returncode=128, stdout="", stderr="not a repo")
+        executor._check_clean_tree()
+
+    def test_run_checks_tree_before_touching_git(self, executor):
+        calls = []
+        with patch.object(ex.StepExecutor, "_print_header", lambda self: calls.append("header")), \
+             patch.object(ex.StepExecutor, "_check_clean_tree", lambda self: calls.append("clean")), \
+             patch.object(ex.StepExecutor, "_check_blockers", lambda self: calls.append("blockers")), \
+             patch.object(ex.StepExecutor, "_checkout_branch", lambda self: calls.append("checkout")), \
+             patch.object(ex.StepExecutor, "_load_guardrails", lambda self: ""), \
+             patch.object(ex.StepExecutor, "_ensure_created_at", lambda self: None), \
+             patch.object(ex.StepExecutor, "_execute_all_steps", lambda self, g: None), \
+             patch.object(ex.StepExecutor, "_finalize", lambda self: None):
+            executor.run()
+        assert calls.index("clean") < calls.index("checkout")
+
+
+# ---------------------------------------------------------------------------
+# 모델 고정
+# ---------------------------------------------------------------------------
+
+class TestModelPinned:
+    """모델을 고정하지 않아 step 5만 sonnet-5로 돌았다. 재현도 비용 예측도 안 된다."""
+
+    def test_model_flag_passed(self, executor):
+        mock_result = MagicMock(returncode=0, stdout="{}", stderr="")
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            executor._invoke_claude({"step": 2, "name": "ui"}, "preamble")
+
+        cmd = mock_run.call_args[0][0]
+        assert "--model" in cmd
+        assert cmd[cmd.index("--model") + 1] == ex.StepExecutor.MODEL
+
+    def test_model_is_opus_5(self):
+        assert ex.StepExecutor.MODEL == "claude-opus-5"
+
+
+# ---------------------------------------------------------------------------
+# _check_blockers (= 이전 main() error/blocked 체크)
+# ---------------------------------------------------------------------------
+
 class TestCheckBlockers:
     def _make_executor_with_steps(self, tmp_project, steps):
         d = tmp_project / "phases" / "test-phase"
