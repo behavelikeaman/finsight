@@ -53,6 +53,8 @@ git status --porcelain
 
 시스템 프롬프트에 명시된 scratchpad 디렉토리 하위에 `review/`를 만들고 덤프한다. 없으면 `mktemp -d`로 대체한다. **레포 안에는 쓰지 마라.**
 
+단 **환경변수 `REVIEW_OUT`이 설정되어 있으면 그 경로를 `REVIEW_DIR`로 쓴다.** CI가 판정 파일(6-3)을 정해진 자리에서 읽어가야 하기 때문이다.
+
 **먼저 `review/`를 통째로 지우고 다시 만든다.** 이전 실행의 findings JSON이 남아 있으면, 이번 실행에서 에이전트가 실패했을 때 부모가 옛 결과를 읽어 "그 축은 깨끗했다"로 오인한다 — 4단계의 파싱 실패 처리가 통째로 무력화된다.
 
 ```bash
@@ -186,6 +188,19 @@ owner_id: user.id,
 
 심각도 표기는 `[critical]` `[major]` `[minor]` `[nit]` 그대로 쓴다.
 
+### 6-3. 판정 파일 (환경변수 `REVIEW_OUT`이 설정된 경우에만)
+
+터미널 출력은 사람이 읽는 것이라 CI가 exit code를 매길 수 없다. `$REVIEW_DIR/verdict.json`을 **추가로** 쓴다. 6-1·6-2 출력은 그대로 한다.
+
+```json
+{
+  "verdict": "Blocked",
+  "counts": { "critical": 1, "major": 2, "minor": 3, "nit": 0 }
+}
+```
+
+`verdict`는 `Approve` · `Changes Requested` · `Blocked` 셋 중 하나를 정확히 쓴다. 숫자는 5단계 검증 게이트를 통과한 finding만 세며, **6-1에 표시한 숫자와 반드시 같아야 한다.** 리뷰를 끝까지 마치지 못했으면 이 파일을 쓰지 마라 — CI는 파일이 없는 것을 실패로 취급한다.
+
 ---
 
 ## 7. PR 게시 (인자에 `--post`가 있을 때만)
@@ -198,6 +213,8 @@ owner_id: user.id,
 gh pr view --json number,author,url --jq '{number, author: .author.login, url}'
 ```
 
+**환경변수 `GH_PR`가 설정되어 있으면 그 번호를 대상으로 삼는다** (`gh pr view "$GH_PR" --json ...`). CI는 detached HEAD로 체크아웃하므로 인자 없는 `gh pr view`가 PR을 찾지 못한다.
+
 현재 브랜치에 PR이 없으면 게시하지 않고 그 사실을 알린다. **PR을 새로 만들지 마라** — 사용자가 지시하지 않은 outward-facing 작업이다.
 
 ### 7-2. 판정 → 리뷰 이벤트
@@ -208,7 +225,9 @@ gh pr view --json number,author,url --jq '{number, author: .author.login, url}'
 | Changes Requested | `REQUEST_CHANGES` |
 | Blocked | `REQUEST_CHANGES` — GitHub에 대응 상태가 없다. 본문 판정줄로 구분한다 |
 
-**자기 PR에는 `APPROVE`·`REQUEST_CHANGES`를 쓸 수 없다.** GitHub이 거부하므로 PR 작성자가 본인이면 `COMMENT`로 낮춘다. 이때도 본문의 판정줄은 그대로 유지한다 — 판정은 텍스트로 남는다.
+**자기 PR에는 `APPROVE`·`REQUEST_CHANGES`를 쓸 수 없다.** GitHub이 거부하므로, 게시 주체와 PR 작성자가 같으면 `COMMENT`로 낮춘다. 이때도 본문의 판정줄은 그대로 유지한다 — 판정은 텍스트로 남는다.
+
+여기서 비교 대상은 **지금 이 토큰이 행세하는 계정**이지 사람이 아니다. `gh api user --jq .login`으로 확인하라. CI에서는 주체가 `github-actions[bot]`이라 PR 작성자와 다르므로 **`APPROVE`·`REQUEST_CHANGES`를 그대로 쓴다** — 여기서 `COMMENT`로 낮추면 자동 승인이 통째로 사라진다.
 
 ### 7-3. 인라인 코멘트 배치
 

@@ -4,6 +4,8 @@
  * 이 프로젝트에서 AI 비용이 발생하는 두 경로 중 하나(나머지는 step6의 chat).
  * 관문(A) → 규칙 선적용(A) → AI 호출(B) → 저장 → 차감(A) 순서를 반드시
  * 지킨다. 순서가 바뀌면 쿼터가 무의미해지거나, 실패한 호출인데 쿼터가 깎인다.
+ * 차감은 **AI를 실제로 부른 요청만** 한다 — 규칙이 전건을 처리했거나 대상이
+ * 0건이면 비용이 나지 않았으므로 쿼터도 건드리지 않는다.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { NextResponse, type NextRequest } from "next/server";
@@ -78,7 +80,9 @@ export async function POST(
   }
   const mode: ClassifyMode = anonymous ? "sample" : requestedMode;
 
-  let quotaLeftAfter = 0;
+  // 차감 여부는 AI를 실제로 불렀는지에 달려 있어 이 시점에는 알 수 없다.
+  // 여기서는 차감 전 잔여만 잡아 두고, 응답 값은 마지막에 확정한다.
+  let quotaLeftBefore = 0;
 
   if (mode === "sample") {
     const allowed = await checkSampleAllowance(userId);
@@ -92,7 +96,7 @@ export async function POST(
       // 'tier_required'는 실제로 나오지 않는다. 방어적으로 매핑한다.
       return jsonResponse({ ok: false, reason: "quota_exceeded" });
     }
-    quotaLeftAfter = verdict.left - 1;
+    quotaLeftBefore = verdict.left;
   }
 
   const { data: pending, error: pendingError } = await supabase
@@ -164,6 +168,9 @@ export async function POST(
   }
 
   let aiResults: ClassifyOutputItem[] = [];
+  // 과금이 발생했는가. aiResults.length로 대신하지 마라 — 모델이 빈 배열을
+  // 돌려줘도 토큰은 이미 나갔다.
+  let aiInvoked = false;
 
   if (unmatched.length > 0) {
     try {
@@ -173,6 +180,8 @@ export async function POST(
       // AI 실패와 함께 버릴 이유가 없다. 쿼터는 차감하지 않는다.
       return NextResponse.json({ ok: false }, { status: 502 });
     }
+
+    aiInvoked = true;
 
     const aiSaveFailed = await saveClassifications(
       supabase,
@@ -198,8 +207,13 @@ export async function POST(
     .eq("owner_id", userId);
 
   // 표본은 LLM 호출 직전에 이미 선점했다(claimSample). 여기서 또 소진하지 마라.
-  // 월 쿼터는 경합에 노출되는 구간이 아니라 성공 경로에서만 차감한다.
-  if (mode !== "sample") {
+  // 월 쿼터는 AI를 실제로 부른 성공 경로에서만 차감한다. 규칙이 전건을
+  // 처리했거나(unmatched 없음) 대상이 0건이면 비용이 나지 않았다.
+  //
+  // 알려진 기존 한계(이번 과제 범위 밖): 월 쿼터에는 표본의 claim_sample()에
+  // 대응하는 원자적 선점이 없다. checkQuota와 여기 사이에 AI 호출 시간만큼
+  // 틈이 있어 동시 요청이 한도를 넘겨 호출할 수 있다.
+  if (mode !== "sample" && aiInvoked) {
     await consumeQuota(userId, "classify");
   }
 
@@ -208,7 +222,12 @@ export async function POST(
     classified: matched.length + aiResults.length,
     fromRules: matched.length,
     fromAi: aiResults.length,
-    quotaLeft: mode === "sample" ? 0 : quotaLeftAfter,
+    quotaLeft:
+      mode === "sample"
+        ? 0
+        : aiInvoked
+          ? quotaLeftBefore - 1
+          : quotaLeftBefore,
   });
 }
 

@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "test -f package.json || { echo 'skip: no package.json yet (before step0 project-setup)'; exit 0; }; npm run lint 2>&1 && npm run build 2>&1 && npm run test 2>&1"
+            "command": "test -z \"$CI\" || { echo 'skip: CI에서는 이 검사를 워크플로우 job이 따로 한다 (node_modules도 없다)'; exit 0; }; test -f package.json || { echo 'skip: no package.json yet (before step0 project-setup)'; exit 0; }; npm run lint 2>&1 && npm run build 2>&1 && npm run test 2>&1"
           }
         ]
       }
