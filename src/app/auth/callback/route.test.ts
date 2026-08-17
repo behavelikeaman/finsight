@@ -62,6 +62,25 @@ describe("GET /auth/callback", () => {
     expect(res.headers.get("location")).toBe("http://localhost/dashboard");
   });
 
+  // 프리픽스 문자열 검사만으로는 부족하다. WHATWG URL 파서는 http(s) 스킴에서
+  // 백슬래시를 슬래시와 똑같이 취급하므로, `//`로 시작하지 않는 `/\evil.com`도
+  // 외부 오리진으로 풀린다.
+  it("next가 백슬래시 변형(/\\)이면 거부한다", async () => {
+    mocks.exchangeCodeForSession.mockResolvedValue({ error: null });
+
+    const res = await GET(request("?code=abc123&next=/%5Cevil.com"));
+
+    expect(res.headers.get("location")).toBe("http://localhost/dashboard");
+  });
+
+  it("OAuth 에러 경로에서도 백슬래시 변형을 거부한다", async () => {
+    const res = await GET(request("?error=access_denied&next=/%5Cevil.com"));
+
+    const location = new URL(res.headers.get("location") ?? "");
+    expect(location.origin).toBe("http://localhost");
+    expect(location.pathname).toBe("/dashboard");
+  });
+
   it("code가 없으면 에러 쿼리를 달아 next로 되돌린다", async () => {
     const res = await GET(request("?next=/analyses/analysis-1"));
 

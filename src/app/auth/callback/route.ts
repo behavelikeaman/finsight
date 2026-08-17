@@ -13,7 +13,7 @@ const DEFAULT_NEXT = "/dashboard";
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const url = new URL(request.url);
   const code = url.searchParams.get("code");
-  const next = safeNext(url.searchParams.get("next"));
+  const next = safeNext(url.searchParams.get("next"), url.origin);
 
   // 연결 실패는 code 없이 error/error_code 쿼리로 돌아온다. code 누락과 뭉뚱그리면
   // "이미 가입된 Google"인지 아닌지를 사용자에게 안내할 수 없다.
@@ -40,11 +40,24 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   return NextResponse.redirect(new URL(next, request.url));
 }
 
-/** 같은 오리진의 경로만 허용한다. `/`로 시작하지 않거나 `//`로 시작하면 기본값으로 닫는다. */
-function safeNext(value: string | null): string {
+/**
+ * 같은 오리진의 경로만 허용한다.
+ *
+ * 프리픽스 문자열 검사로는 막을 수 없다 — WHATWG URL 파서는 http(s) 스킴에서
+ * 백슬래시를 슬래시와 똑같이 취급하므로, `//`로 시작하지 않는 `/\evil.com`도
+ * 외부 오리진으로 풀린다. 실제로 리졸브한 뒤 오리진을 비교해야 파서 차이를
+ * 이용한 우회를 닫을 수 있다.
+ */
+function safeNext(value: string | null, origin: string): string {
   if (!value) return DEFAULT_NEXT;
-  if (!value.startsWith("/") || value.startsWith("//")) return DEFAULT_NEXT;
-  return value;
+
+  try {
+    const resolved = new URL(value, origin);
+    if (resolved.origin !== origin) return DEFAULT_NEXT;
+    return `${resolved.pathname}${resolved.search}${resolved.hash}`;
+  } catch {
+    return DEFAULT_NEXT;
+  }
 }
 
 /**
