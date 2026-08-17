@@ -282,11 +282,80 @@ describe("POST /api/analyses/:id/classify", () => {
   });
 
   it("성공하면 consumeQuota가 1회 호출된다", async () => {
-    await POST(request({ mode: "full" }), ctx());
+    const res = await POST(request({ mode: "full" }), ctx());
+    const json = (await res.json()) as { quotaLeft: number };
 
     expect(mocks.consumeQuota).toHaveBeenCalledTimes(1);
     expect(mocks.consumeQuota).toHaveBeenCalledWith("uid-1", "classify");
     expect(mocks.claimSample).not.toHaveBeenCalled();
+    // 차감했으면 응답의 잔여도 1 줄어 있어야 한다. 차감 여부와 quotaLeft가
+    // 어긋나면 사용자가 보는 숫자가 실제 카운터와 달라진다.
+    expect(json.quotaLeft).toBe(8);
+  });
+
+  // AI 비용이 0인 full 요청은 쿼터를 태우지 않는다. CLAUDE.md의 비용 규칙은
+  // user_rules 매칭 건을 AI로 보내지 말라고 요구하는데, 규칙으로 전건이
+  // 처리된 요청에서 쿼터를 깎으면 규칙을 잘 만든 사용자가 오히려 손해를 본다.
+  it("full 모드에서 규칙이 전건 매칭되면 consumeQuota가 호출되지 않는다", async () => {
+    userRulesFixture = [
+      {
+        id: "rule-1",
+        owner_id: "uid-1",
+        merchant_pattern: "스타벅스",
+        classification: "business",
+        account_code: "entertainment",
+        created_at: "2026-01-01T00:00:00Z",
+      },
+      {
+        id: "rule-2",
+        owner_id: "uid-1",
+        merchant_pattern: "이마트",
+        classification: "personal",
+        account_code: null,
+        created_at: "2026-01-01T00:00:00Z",
+      },
+    ];
+
+    const res = await POST(request({ mode: "full" }), ctx());
+    const json = (await res.json()) as { ok: true; fromAi: number; quotaLeft: number };
+
+    expect(mocks.classifyTransactions).not.toHaveBeenCalled();
+    expect(mocks.consumeQuota).not.toHaveBeenCalled();
+    expect(json.fromAi).toBe(0);
+    expect(json.quotaLeft).toBe(9);
+  });
+
+  // 이미 분류가 끝나 classification IS NULL인 건이 0인 재요청. 호출이 없으니
+  // 차감도 없다.
+  it("full 모드에서 분류 대상이 0건이면 consumeQuota가 호출되지 않는다", async () => {
+    pendingRowsFixture = [];
+
+    const res = await POST(request({ mode: "full" }), ctx());
+    const json = (await res.json()) as {
+      ok: true;
+      classified: number;
+      quotaLeft: number;
+    };
+
+    expect(json.ok).toBe(true);
+    expect(json.classified).toBe(0);
+    expect(mocks.classifyTransactions).not.toHaveBeenCalled();
+    expect(mocks.consumeQuota).not.toHaveBeenCalled();
+    expect(json.quotaLeft).toBe(9);
+  });
+
+  // 차감 기준은 '결과가 몇 건이냐'가 아니라 '호출이 있었느냐'다. 모델이 빈
+  // 배열을 돌려줘도 토큰은 이미 과금됐으므로 aiResults.length로 판정하면
+  // 반대 방향(과금됐는데 미차감)으로 샌다.
+  it("AI가 빈 배열을 반환해도 호출은 있었으므로 차감한다", async () => {
+    mocks.classifyTransactions.mockResolvedValue([]);
+
+    const res = await POST(request({ mode: "full" }), ctx());
+    const json = (await res.json()) as { quotaLeft: number };
+
+    expect(mocks.classifyTransactions).toHaveBeenCalledTimes(1);
+    expect(mocks.consumeQuota).toHaveBeenCalledTimes(1);
+    expect(json.quotaLeft).toBe(8);
   });
 
   it("mode:'sample'이면 claimSample이 호출되고 consumeQuota는 호출되지 않는다", async () => {
