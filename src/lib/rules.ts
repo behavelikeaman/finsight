@@ -83,6 +83,8 @@ function pickLongestMatch(
  * 사용자가 고친 거래에서 재사용 가능한 규칙 패턴을 뽑는다.
  * 지점·번호 꼬리를 뗀다('스타벅스 강남점' → '스타벅스'). 원본이 짧으면(4자
  * 이하) 그대로 쓴다 — 과하게 일반화한 패턴은 무관한 거래까지 잡는다.
+ *
+ * 반환값은 항상 공백이 정규화된 문자열이다. 호출부에서 다시 trim하지 않아도 된다.
  */
 export function derivePattern(merchant: string): string {
   const trimmed = merchant.trim().replace(/\s+/g, " ");
