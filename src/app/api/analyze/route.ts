@@ -14,8 +14,10 @@ import type { AnalyzeRequest, AnalyzeResponse } from "@/types/api";
 import type { NormalizedRow, SourceKind } from "@/types/domain";
 import { MAX_ROWS } from "@/types/tier";
 
-/** 10,000행짜리 정규화 배열의 실측 크기에 여유를 둔 상한. */
-const MAX_BODY_BYTES = 5 * 1024 * 1024;
+/** 10,000행짜리 정규화 배열의 실측 크기에 여유를 둔 상한. 환경별로 조정 가능하다. */
+const MAX_BODY_BYTES = Number(
+  process.env.ANALYZE_MAX_BODY_BYTES ?? 5 * 1024 * 1024,
+);
 const OCCURRED_ON_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const SOURCE_KINDS: SourceKind[] = ["csv", "xlsx"];
 
