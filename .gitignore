@@ -29,3 +29,7 @@ __pycache__/
 phases/**/phase*-output.json
 phases/**/step*-output.json
 .vercel
+
+# SOP 공정 실행 기록. 실행할 때마다 리포트가 쌓인다.
+# 각 리포트가 검증 대상 git HEAD를 명시하므로 이력은 리포트 자체로 되짚을 수 있다.
+ops/

@@ -33,6 +33,13 @@ case "$FILE_PATH" in
     ;;
 esac
 
+# .claude/ 하위는 에이전트·워크플로우·스킬 설정 — 앱 구현 코드가 아니므로 허용
+case "$FILE_PATH" in
+  */.claude/*)
+    exit 0
+    ;;
+esac
+
 # docs/ 는 참조 자산·문서 — 구현 코드가 아니므로 허용
 case "$FILE_PATH" in
   */docs/*|*\\docs\\*)
