@@ -1,6 +1,6 @@
 ---
 name: review-code
-description: 변경 사항을 correctness·security·test coverage 세 축의 서브에이전트로 병렬 리뷰하고, 심각도 4단계와 판정(Approve/Changes Requested/Blocked)이 붙은 Harness 포맷으로 보고한다. "코드 리뷰", "리뷰해줘", "PR 리뷰" 요청에 사용한다.
+description: 변경 사항을 correctness·security·test coverage 세 축의 서브에이전트로 병렬 리뷰하고, 심각도 4단계와 판정(Approve/Changes Requested/Blocked)이 붙은 Harness 포맷으로 보고한다. "코드 리뷰", "리뷰해줘", "PR 리뷰" 요청에 사용한다. 인자로 리비전 범위·경로를 받고, --post를 주면 현재 브랜치의 PR에 리뷰로 게시한다.
 allowed-tools: Bash, Read, Grep, Glob, Write, Agent
 ---
 
@@ -31,11 +31,13 @@ allowed-tools: Bash, Read, Grep, Glob, Write, Agent
 
 ---
 
-## 1. 스코프 감지
+## 1. 인자와 스코프 감지
 
-`$ARGUMENTS`가 있으면 그대로 `git diff`의 인자로 넘긴다 (예: `HEAD~3..HEAD`, `main...feat-x`, `-- src/lib/`).
+호출 인자: $ARGUMENTS
 
-없으면 자동 감지한다.
+위 인자란이 비어 있지 않으면, `--post`를 뺀 나머지를 그대로 `git diff`의 인자로 넘긴다 (예: `HEAD~3..HEAD`, `main...feat-x`, `-- src/lib/`). `--post`는 7단계에서만 쓴다.
+
+인자란이 비어 있으면 자동 감지한다.
 
 ```bash
 git rev-parse --show-toplevel
@@ -51,7 +53,11 @@ git status --porcelain
 
 시스템 프롬프트에 명시된 scratchpad 디렉토리 하위에 `review/`를 만들고 덤프한다. 없으면 `mktemp -d`로 대체한다. **레포 안에는 쓰지 마라.**
 
+**먼저 `review/`를 통째로 지우고 다시 만든다.** 이전 실행의 findings JSON이 남아 있으면, 이번 실행에서 에이전트가 실패했을 때 부모가 옛 결과를 읽어 "그 축은 깨끗했다"로 오인한다 — 4단계의 파싱 실패 처리가 통째로 무력화된다.
+
 ```bash
+rm -rf "$REVIEW_DIR" && mkdir -p "$REVIEW_DIR"
+
 # 워킹 트리 모드
 git diff HEAD > "$REVIEW_DIR/diff.patch"
 git diff HEAD --name-only > "$REVIEW_DIR/files.txt"
@@ -182,8 +188,58 @@ owner_id: user.id,
 
 ---
 
+## 7. PR 게시 (인자에 `--post`가 있을 때만)
+
+기본 출력은 터미널이다. `--post`가 없으면 이 단계를 통째로 건너뛴다.
+
+### 7-1. 대상 PR 확인
+
+```bash
+gh pr view --json number,author,url --jq '{number, author: .author.login, url}'
+```
+
+현재 브랜치에 PR이 없으면 게시하지 않고 그 사실을 알린다. **PR을 새로 만들지 마라** — 사용자가 지시하지 않은 outward-facing 작업이다.
+
+### 7-2. 판정 → 리뷰 이벤트
+
+| 판정 | event |
+|------|-------|
+| Approve | `APPROVE` |
+| Changes Requested | `REQUEST_CHANGES` |
+| Blocked | `REQUEST_CHANGES` — GitHub에 대응 상태가 없다. 본문 판정줄로 구분한다 |
+
+**자기 PR에는 `APPROVE`·`REQUEST_CHANGES`를 쓸 수 없다.** GitHub이 거부하므로 PR 작성자가 본인이면 `COMMENT`로 낮춘다. 이때도 본문의 판정줄은 그대로 유지한다 — 판정은 텍스트로 남는다.
+
+### 7-3. 인라인 코멘트 배치
+
+**인라인 코멘트는 diff에 포함된 줄에만 달린다.** 이 리뷰는 호출부를 추적해 diff 밖 파일을 지적하기도 하는데, 그런 finding을 인라인으로 보내면 API가 거부한다. `files.txt`에 없는 파일의 finding은 요약 본문의 "주요 지적"으로 옮기고 `경로:줄`을 텍스트로 적는다.
+
+### 7-4. 게시
+
+payload를 JSON 파일로 쓴 뒤 `--input`으로 넘긴다. 본문에 한글·백틱·코드블록이 섞이므로 인라인 문자열로 만들지 마라.
+
+```json
+{
+  "event": "COMMENT",
+  "body": "6-1의 요약 마크다운 전체",
+  "comments": [
+    { "path": "src/app/auth/callback/route.ts", "line": 57, "side": "RIGHT", "body": "6-2의 4줄 코멘트" }
+  ]
+}
+```
+
+```bash
+gh api --method POST repos/{owner}/{repo}/pulls/{n}/reviews --input "$REVIEW_DIR/pr-review.json"
+```
+
+**엔드포인트에 선행 슬래시를 붙이지 마라.** Git Bash가 `/repos/...`를 Windows 경로로 바꿔 `invalid API endpoint`로 실패한다.
+
+게시한 뒤 리뷰 URL을 사용자에게 알린다.
+
+---
+
 ## 하지 않는 것
 
 - **코드를 고치지 마라.** 이 스킬은 리뷰만 한다. 수정은 사용자가 따로 지시한다
-- **`gh`로 PR에 코멘트를 달지 마라.** 포맷만 PR 리뷰를 따를 뿐, 출력은 터미널이다
+- **`--post` 없이 PR에 게시하지 마라.** 기본 출력은 터미널이다
 - 발견이 0건이면 억지로 채우지 말고 `Approve`로 보고한다
