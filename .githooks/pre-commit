@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# pre-commit — 결정론적 게이트만. AI는 부르지 않는다.
+#
+# AI 리뷰(/review-code)는 PR에서 GitHub Actions가 돌린다. 여기서 AI를 부르면
+# 커밋마다 수 분이 걸리고 같은 diff에 판정이 흔들려, 결국 --no-verify로 우회하게 된다.
+#
+# 활성화: git config core.hooksPath .githooks
+set -uo pipefail
+
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+STAGED=$(git -c core.quotepath=false diff --cached --name-only --diff-filter=ACMR)
+if [ -z "$STAGED" ]; then
+  exit 0
+fi
+
+FAILED=""
+step() { printf '  %-28s' "$1"; }
+ok()   { printf 'ok\n'; }
+fail() { printf 'FAILED\n'; FAILED="${FAILED}$1 "; }
+
+echo "pre-commit 게이트"
+
+# 1. CLAUDE.md CRITICAL 규칙 — 인덱스 내용을 본다 (워킹 트리가 아니라).
+step "critical-rules"
+RULES_OUT=$(node scripts/critical-rules.mjs 2>&1)
+if [ $? -eq 0 ]; then ok; else fail "critical-rules"; echo "$RULES_OUT"; fi
+
+# 2. TDD 가드 — Claude Code용 훅과 같은 스크립트를 재사용한다.
+#    판정 로직을 여기 복제하면 두 게이트가 서서히 어긋난다.
+step "tdd-guard"
+TDD_OUT=""
+while IFS= read -r f; do
+  [ -z "$f" ] && continue
+  # 절대 경로로 넘긴다. tdd-guard.sh의 면제 패턴(*/.claude/*, */docs/*)이
+  # 선행 슬래시를 전제하므로, git이 주는 상대 경로를 그대로 넘기면 전부 오탐이 된다.
+  VERDICT=$(printf '{"tool_input":{"file_path":"%s/%s"}}' "$PWD" "$f" | bash .claude/hooks/tdd-guard.sh 2>/dev/null)
+  case "$VERDICT" in
+    *'"deny"'*) TDD_OUT="${TDD_OUT}    ${f}: 대응하는 테스트 파일이 없다\n" ;;
+  esac
+done <<< "$STAGED"
+if [ -z "$TDD_OUT" ]; then ok; else fail "tdd-guard"; printf "%b" "$TDD_OUT"; fi
+
+# 3. 린트 — staged 파일만.
+LINT_FILES=$(echo "$STAGED" | grep -E '\.(ts|tsx|js|jsx|mjs)$' || true)
+if [ -n "$LINT_FILES" ]; then
+  step "eslint"
+  LINT_OUT=$(echo "$LINT_FILES" | xargs -d '\n' npx eslint 2>&1)
+  if [ $? -eq 0 ]; then ok; else fail "eslint"; echo "$LINT_OUT"; fi
+
+  # 4. 타입 검사 — 프로젝트 전체. staged 파일만 보면 호출부의 깨짐을 놓친다.
+  step "tsc --noEmit"
+  TSC_OUT=$(npx tsc --noEmit 2>&1)
+  if [ $? -eq 0 ]; then ok; else fail "tsc"; echo "$TSC_OUT"; fi
+
+  # 5. 관련 테스트만. 전체 스위트는 CI가 돌린다.
+  step "vitest related"
+  TEST_OUT=$(echo "$LINT_FILES" | xargs -d '\n' npx vitest related --run 2>&1)
+  if [ $? -eq 0 ]; then ok; else fail "vitest"; echo "$TEST_OUT"; fi
+fi
+
+if [ -n "$FAILED" ]; then
+  echo ""
+  echo "커밋을 중단했다: ${FAILED}"
+  echo "정말 넘기려면 git commit --no-verify (CI가 같은 검사를 다시 한다)"
+  exit 1
+fi
+
+exit 0

@@ -1,0 +1,101 @@
+name: PR 리뷰
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+# 같은 PR에 새 커밋이 올라오면 돌던 리뷰를 취소한다.
+# 취소하지 않으면 push 한 번에 리뷰가 한 번씩 쌓여 토큰이 그대로 새어 나간다.
+concurrency:
+  group: review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  # 결정론적 게이트. pre-commit 훅과 같은 스크립트를 돌린다 —
+  # 훅은 --no-verify로 넘길 수 있으므로 실제 강제는 여기서 한다.
+  critical-rules:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: node scripts/critical-rules.mjs --range "origin/${BASE}...HEAD"
+        env:
+          BASE: ${{ github.base_ref }}
+
+  ai-review:
+    # fork PR에는 secrets가 없다. 액션이 인증 실패로 죽는 대신 아예 건너뛴다.
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      # 자동 머지 예약에 contents: write가 필요하다.
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      # 문서·설정만 바뀐 PR에 서브에이전트 3개를 띄우지 않는다.
+      # paths-ignore로 잡지 않는 이유는, 그러면 job이 아예 안 돌아
+      # required check가 영원히 pending으로 남기 때문이다.
+      - name: 코드 변경 여부 판별
+        id: scope
+        env:
+          BASE: ${{ github.base_ref }}
+        run: |
+          if git diff --name-only "origin/${BASE}...HEAD" | grep -qE '^(src|supabase)/'; then
+            echo "review=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "review=false" >> "$GITHUB_OUTPUT"
+            echo "src/·supabase/ 변경 없음 — AI 리뷰를 건너뛴다"
+          fi
+
+      - name: /review-code
+        if: steps.scope.outputs.review == 'true'
+        uses: anthropics/claude-code-action@v1
+        env:
+          # 스킬이 판정 파일을 여기에 쓴다. 레포 밖이어야 한다.
+          REVIEW_OUT: ${{ runner.temp }}/review
+          # 스킬 7단계가 gh로 PR에 리뷰를 게시한다.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # detached HEAD로 체크아웃하므로 인자 없는 `gh pr view`는 PR을 못 찾는다.
+          GH_PR: ${{ github.event.pull_request.number }}
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: "/review-code origin/${{ github.base_ref }}...HEAD --post"
+          claude_args: "--allowedTools Bash,Read,Grep,Glob,Write,Agent"
+
+      # critical·major ≥ 1 → 여기서 job이 실패한다. 승인도 머지도 없다.
+      # minor ≥ 1        → approve (스킬 7단계가 이미 PR에 APPROVE를 남겼다)
+      # nit만·무결        → merge
+      - name: 판정 처리
+        id: gate
+        if: steps.scope.outputs.review == 'true'
+        run: node scripts/review-gate.mjs "${RUNNER_TEMP}/review/verdict.json"
+
+      # --auto를 쓴다. 이 job 자신이 required check라, 지금 즉시 머지하려 하면
+      # "자기 자신이 pending"이라 거부당한다. 예약해두면 job이 초록이 된 뒤 머지된다.
+      - name: 자동 머지 예약
+        if: steps.gate.outputs.action == 'merge'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr merge --auto --squash "${{ github.event.pull_request.number }}"
+          echo "nit 이하만 있어 자동 머지를 예약했다"

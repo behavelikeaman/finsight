@@ -69,6 +69,17 @@
 - 마이그레이션에 `DROP TABLE`을 쓰지 마라 (훅이 차단한다)
 - 커밋 메시지는 conventional commits 형식을 따를 것 (feat:, fix:, docs:, refactor:)
 
+### 자동 게이트 2계층
+- **pre-commit(`.githooks/pre-commit`)** — 결정론적 검사만: CRITICAL 규칙 스캔 → TDD 가드 → eslint → `tsc --noEmit` → 관련 테스트. 약 12초. **클론 후 `git config core.hooksPath .githooks`를 한 번 실행해야 켜진다**
+- 위 CRITICAL 규칙 중 **기계로 판정 가능한 것**은 `scripts/critical-rules.mjs`가 검사한다. 훅과 CI가 같은 스크립트를 쓴다. 규칙을 더할 때는 `scripts/critical-rules.test.mjs`에 케이스를 먼저 쓴다. 전체 점검은 `node scripts/critical-rules.mjs --all`
+- **PR(`.github/workflows/review.yml`)** — `/review-code`가 AI 리뷰를 돌려 PR에 게시한다. 저장소 시크릿 `ANTHROPIC_API_KEY`가 필요하다
+- 심각도가 곧 머지 정책이다. 판정은 `scripts/review-gate.mjs`가 하고, 바꾸려면 테스트부터 고친다
+  - `critical`·`major` ≥ 1 → **차단.** job 실패. 승인도 머지도 없다
+  - `minor` ≥ 1 → **승인까지만.** 머지는 사람이 판단한다
+  - `nit`만 또는 무결 → **자동 승인 + 자동 머지**(squash)
+  - 판정 파일이 없거나 개수와 판정이 어긋나면 차단이다 — 자동 머지는 되돌리기 어려우므로 의심스러우면 열지 않는다
+- AI 리뷰를 pre-commit에 넣지 마라. 커밋마다 수 분이 걸리고 판정이 흔들려, 결국 `--no-verify`로 우회하게 된다
+
 ## 명령어
 npm run dev      # 개발 서버
 npm run build    # 프로덕션 빌드
