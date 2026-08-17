@@ -100,6 +100,19 @@ export function derivePattern(merchant: string): string {
   return head.length > 0 ? head : trimmed;
 }
 
+/**
+ * 주어진 상호가 규칙 목록에서 몇 건에 걸리는지 센다.
+ * 규칙 관리 화면에서 "이 규칙이 실제로 쓰이고 있는지" 보여줄 때 쓴다.
+ */
+export function countMatchingRules(
+  rules: { pattern: string }[],
+  merchant: string,
+): number {
+  const target = merchant.trim().toLowerCase();
+  return rules.filter((rule) => target.includes(rule.pattern.toLowerCase()))
+    .length;
+}
+
 function isBranchTail(token: string): boolean {
   return /점$/.test(token) || /^\d+$/.test(token);
 }
