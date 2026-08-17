@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
+import { isAnonymousUser } from "@/lib/supabase/auth";
 import { createServerSupabase } from "@/lib/supabase/server";
 import { getCurrentUser, getEffectiveTier } from "@/lib/supabase/session";
 import type { Tier } from "@/types/domain";
@@ -8,6 +9,7 @@ import type { Tier } from "@/types/domain";
 import { BillingSync } from "@/components/billing/BillingSync";
 import { ManageSubscriptionButton } from "@/components/billing/ManageSubscriptionButton";
 import { UpgradeButton } from "@/components/billing/UpgradeButton";
+import { EmailOptInToggle } from "@/components/dashboard/EmailOptInToggle";
 
 // 사용자별 데이터라 정적 프리렌더 대상이 아니다. 키가 없는 빌드 환경에서
 // cookies() 호출 전에 env 검사가 먼저 실행돼 프리렌더가 깨지는 것도 막는다.
@@ -17,6 +19,7 @@ interface SubscriptionRow {
   current_period_end: string | null;
   polar_customer_id: string | null;
   subscription_status: string | null;
+  email_opt_in: boolean;
 }
 
 interface AnalysisListRow {
@@ -53,11 +56,16 @@ export default async function DashboardPage({
   const tier = await getEffectiveTier(user.id);
   const { data: profileData } = await supabase
     .from("profiles")
-    .select("current_period_end, polar_customer_id, subscription_status")
+    .select(
+      "current_period_end, polar_customer_id, subscription_status, email_opt_in",
+    )
     .eq("id", user.id)
     .maybeSingle();
 
   const profile = (profileData ?? null) as SubscriptionRow | null;
+  // 익명 세션에는 보낼 이메일 주소가 없다. 토글을 CSS로 가리는 대신 서버가
+  // 서브트리를 아예 렌더하지 않는다 — RSC 페이로드에 값이 실리지 않는다.
+  const isAnonymous = isAnonymousUser(user);
   // 결제 이력이 있어야 Polar에 고객이 존재한다. 없는 사용자에게 관리 버튼을
   // 보이면 눌러도 404다 — 서버가 판정해서 아예 내보내지 않는다.
   const hasPolarCustomer = Boolean(profile?.polar_customer_id);
@@ -165,6 +173,19 @@ export default async function DashboardPage({
             ))}
           </tbody>
         </table>
+      )}
+
+      {!isAnonymous && (
+        // 분석이 0건이어도 렌더된다. 「내 데이터 전체 삭제」는 analyses만 지우고
+        // profiles는 남기므로, 삭제 후에도 동의를 끌 수 있는 화면이 필요하다.
+        <section className="flex flex-col gap-2 rounded-lg border border-hairline bg-canvas px-5 py-4">
+          <h2 className="text-sm font-medium text-ink">이메일 알림</h2>
+          <p className="text-xs text-muted">
+            지금은 발송하는 메일이 없습니다. 준비되면 이 설정에 따라 보내며,
+            언제든 이 토글을 꺼서 수신을 중단할 수 있습니다.
+          </p>
+          <EmailOptInToggle initialOptIn={profile?.email_opt_in ?? false} />
+        </section>
       )}
     </main>
   );

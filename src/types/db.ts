@@ -31,6 +31,13 @@ export interface ProfileRow {
    * 쓴다. 권리 판정은 effective_tier() 한 곳에서만 한다.
    */
   subscription_status: string | null;
+  /**
+   * 이메일 수신 동의. 기본 false(명시적 opt-in).
+   *
+   * 사용자가 직접 UPDATE할 수 없다 — 쓰기는 set_email_opt_in() RPC로만 한다.
+   * 권리 판정(tier·쿼터·게이팅)에 절대 끌어들이지 마라.
+   */
+  email_opt_in: boolean;
 }
 
 export interface AnalysisRow {

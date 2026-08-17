@@ -129,6 +129,8 @@ usage_counters (owner_id, period, classify_used, chat_used)
 security definer 함수 3개: `effective_tier(uid)` · `increment_usage(kind)` · `mark_sample_used()`.
 `increment_usage`는 **`uid`·`period`를 인자로 받지 않는다** — 함수 안에서 `auth.uid()`와 서버 시각을 읽는다. 인자로 받으면 남의 카운터를 소진시킬 수 있다.
 
+`profiles.email_opt_in`(이메일 수신 동의)의 쓰기도 같은 방식이다 — `set_email_opt_in(opt_in)`(security definer)만 쓴다. `auth.uid()` 본인 행의 그 컬럼 하나만 갱신하고, `auth.users.email`이 없는 익명 세션은 거부한다. 컬럼 하나를 열려고 `profiles`의 테이블 UPDATE를 되살리면 `tier`까지 함께 열린다(0002).
+
 **service role은 Polar 웹훅의 tier 갱신과 `billing/sync`에서만** 쓴다. `DELETE /api/account`는 `analyses`·`user_rules`만 지우고 `usage_counters`·`profiles`·`auth.users`는 건드리지 않는다.
 
 ## API 계약
@@ -144,6 +146,7 @@ security definer 함수 3개: `effective_tier(uid)` · `increment_usage(kind)` �
 | `POST /api/billing/sync` | — | `{ tier, currentPeriodEnd }` |
 | `POST /api/webhooks/polar` | Polar 이벤트 (서명 검증) | `200` |
 | `DELETE /api/account` | — | `{ ok }` |
+| `PATCH /api/account` | `{ emailOptIn }` | `{ ok:true, emailOptIn }` \| `{ ok:false, reason:'unauthorized'\|'anonymous_denied'\|'invalid'\|'write_failed' }` |
 
 `billing/sync`가 POST인 이유: Polar를 조회해 `profiles.tier`를 갱신하는 부수효과가 있다. GET이면 프리페치·프리렌더가 호출해 예기치 않게 실행된다. 체크아웃 리다이렉트 직후 호출해 **웹훅 도착을 기다리지 않고** Pro를 반영한다.
 

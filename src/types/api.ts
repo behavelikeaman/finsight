@@ -101,3 +101,20 @@ export interface PortalResponse {
 export interface OkResponse {
   ok: true;
 }
+
+/**
+ * PATCH /api/account — 이메일 수신 동의.
+ *
+ * 응답의 emailOptIn은 요청 값의 반향이 아니라 DB가 저장한 값이다. 클라이언트는
+ * 이 값으로 토글 상태를 세팅한다 — 요청 값으로 세팅하면 화면과 DB가 어긋난다.
+ */
+export interface AccountSettingsRequest {
+  emailOptIn: boolean;
+}
+
+export type AccountSettingsResponse =
+  | { ok: true; emailOptIn: boolean }
+  | {
+      ok: false;
+      reason: "unauthorized" | "anonymous_denied" | "invalid" | "write_failed";
+    };
