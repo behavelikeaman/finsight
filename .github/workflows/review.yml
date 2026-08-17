@@ -80,7 +80,20 @@ jobs:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           prompt: "/review-code origin/${{ github.base_ref }}...HEAD --post"
-          claude_args: "--allowedTools Bash,Read,Grep,Glob,Write,Agent"
+          # 서브에이전트 툴 이름이 버전에 따라 Agent/Task로 갈린다. 둘 다 허용하지
+          # 않으면 스킬이 3축 병렬 리뷰를 띄우지 못하고 중간에 무너진다.
+          claude_args: "--allowedTools Bash,Read,Grep,Glob,Write,Agent,Task,TodoWrite"
+
+      # 리뷰가 중간에 죽으면 로그만으로는 어디까지 갔는지 알 수 없다.
+      # findings-*.json과 verdict.json을 남겨 사후 진단이 가능하게 한다.
+      - name: 리뷰 산출물 보관
+        if: always() && steps.scope.outputs.review == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: review-${{ github.event.pull_request.number }}
+          path: ${{ runner.temp }}/review
+          if-no-files-found: warn
+          retention-days: 7
 
       # critical·major ≥ 1 → 여기서 job이 실패한다. 승인도 머지도 없다.
       # minor ≥ 1        → approve (스킬 7단계가 이미 PR에 APPROVE를 남겼다)
