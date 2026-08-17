@@ -81,6 +81,22 @@ describe("GET /auth/callback", () => {
     expect(location.pathname).toBe("/dashboard");
   });
 
+  // safeNext는 통과한 값을 그대로 돌려주지 않고 pathname·search·hash로 다시
+  // 조립한다. 조립에서 한 조각이라도 빠지면 도착 화면이 탭·앵커를 잃는다.
+  it("next의 쿼리와 해시를 보존한 채 리다이렉트한다", async () => {
+    mocks.exchangeCodeForSession.mockResolvedValue({ error: null });
+
+    const res = await GET(
+      request(
+        "?code=abc123&next=%2Fanalyses%2Fanalysis-1%3Ftab%3Dsummary%23section",
+      ),
+    );
+
+    expect(res.headers.get("location")).toBe(
+      "http://localhost/analyses/analysis-1?tab=summary#section",
+    );
+  });
+
   it("code가 없으면 에러 쿼리를 달아 next로 되돌린다", async () => {
     const res = await GET(request("?next=/analyses/analysis-1"));
 
